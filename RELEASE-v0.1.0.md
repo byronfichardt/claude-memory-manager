@@ -81,7 +81,7 @@ If the hook is wired correctly, Claude will answer using facts from your memory 
 
 ## Known issues
 
-- **Unsigned binary** — the app is not code-signed with an Apple Developer certificate. macOS Gatekeeper will refuse to open it on first launch; use the right-click → Open bypass described above. Endpoint protection tools (WithSecure XFENCE, Sophos, CrowdStrike, etc.) may also prompt on first launch or rebuild. Add the `Claude Memory Manager.app` path to your endpoint protection's trusted applications list. One-time setup.
+- **Unsigned binary** — the app is not code-signed with an Apple Developer certificate. macOS Gatekeeper will refuse to open it on first launch; use the right-click → Open bypass described above. Endpoint protection tools may also prompt on first launch or rebuild. If yours does, add the `Claude Memory Manager.app` path to its trusted applications list (one-time setup).
 - **Plain DMG layout** — the DMG is a functional drag-to-Applications installer but doesn't have a custom background image or pre-positioned icons. You'll see the app and an Applications shortcut in the mounted volume; drag the app onto the shortcut. (The standard Tauri DMG prettification requires macOS Automation permission, which isn't reliably available in automated builds.)
 - **The managed section** in your existing `~/.claude*/CLAUDE.md` files is preserved between the `<!-- claude-memory-manager:start -->` and `<!-- claude-memory-manager:end -->` markers. Don't edit inside those markers — they'll be overwritten on re-register. Everything outside is left alone.
 

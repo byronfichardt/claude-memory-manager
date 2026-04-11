@@ -186,7 +186,7 @@ Everything is stored in `~/.claude-memory-manager/`:
 └── memories.db-shm     # shared memory
 ```
 
-If your endpoint protection tool watches dot-folders in `$HOME` (e.g. WithSecure XFENCE), you can override the DB location via the `CLAUDE_MEMORY_DB_DIR` environment variable — set it in Settings → Memory store, and the MCP server will be re-registered with the env var.
+If your endpoint protection tool watches dot-folders in `$HOME` and prompts on every access, you can override the DB location via the `CLAUDE_MEMORY_DB_DIR` environment variable — set it in Settings → Memory store, and the MCP server will be re-registered with the env var.
 
 Per-Claude-config files the app writes to:
 
@@ -228,12 +228,12 @@ rm -rf ~/.claude-memory-manager
 - Verify the hook works: `echo '{"prompt":"docker","session_id":"x","cwd":"/"}' | /path/to/claude-memory-manager --hook`
 - If you recently moved the binary, re-click "Register / Re-register" in Settings to update the paths.
 
-### "WithSecure XFENCE keeps asking for permission"
+### "My endpoint protection keeps asking for permission"
 
-The unsigned debug binary is the culprit. Options:
-1. In WithSecure → Application Control / Folder Shield, add the binary path as trusted.
+The unsigned binary is the culprit — most endpoint protection tools prompt on every access from unknown/unsigned binaries, especially for dot-folders in `$HOME`. Options:
+1. In your endpoint protection settings, add the binary path (or the `.app` bundle path) as trusted. The exact UI varies by product — look for "Application Control", "Folder Shield", "Trusted Applications", or similar.
 2. Build a release binary (`cargo build --release`) — roughly 2× faster startup and sometimes recognized.
-3. Move the DB out of `~/.claude-memory-manager` by setting `CLAUDE_MEMORY_DB_DIR` in Settings.
+3. Move the DB to a location your tool doesn't watch by setting `CLAUDE_MEMORY_DB_DIR` in Settings.
 
 ### "Organize picked bad topics / merged things I didn't want"
 
