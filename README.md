@@ -6,6 +6,17 @@ An automated, self-organizing memory system for [Claude Code](https://code.claud
 
 ---
 
+## Screenshots
+
+| | |
+|---|---|
+| **Home** — topics grid with auto-organize status | **Topic detail** — markdown preview + edit mode |
+| ![Home view](docs/screenshots/home.png) | ![Topic detail](docs/screenshots/topic.png) |
+| **Search** — FTS5 with highlighted snippets | **Settings** — per-config hook + MCP status |
+| ![Search](docs/screenshots/search.png) | ![Settings](docs/screenshots/settings.png) |
+
+---
+
 ## What it does
 
 1. **Ingests** your existing Claude Code memory files (`~/.claude*/projects/*/memory/`) into a central SQLite store.
