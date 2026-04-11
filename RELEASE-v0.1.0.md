@@ -46,13 +46,27 @@ First public release. Automated, self-organizing memory system for Claude Code.
 2. Unzip to get `Claude Memory Manager.app`
 3. Move it to `/Applications` (recommended)
 
-**First launch — Gatekeeper bypass** (both options):
+**First launch — important**:
 
-The binary is **not code-signed**, so macOS Gatekeeper will refuse to open it directly the first time. To bypass:
-- **Right-click** the app → **Open** → confirm "Open" in the dialog
-- After the first bypass, future launches work normally
+The binary is **not code-signed**, and macOS 15+ no longer accepts the old "right-click → Open" bypass for quarantined unsigned apps. Instead, you'll see a misleading **"Claude Memory Manager is damaged and can't be opened"** error on double-click. **The file is not actually damaged** — this is just macOS's quarantine flag.
 
-Once open, click **Get started** in the app. It will:
+**Click Cancel** on that dialog, then run this in Terminal to strip the quarantine attribute:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Claude Memory Manager.app"
+```
+
+(Adjust the path if the `.app` is somewhere other than `/Applications`.)
+
+After that one command, future launches work normally.
+
+To verify the file wasn't tampered with in transit, compare its SHA-256 against `checksums.sha256` from this release:
+
+```bash
+shasum -a 256 ~/Downloads/claude-memory-manager-0.1.0-macos-arm64.dmg
+```
+
+Once the app opens, click **Get started**. It will:
    - Ingest existing memory files from every `~/.claude*/projects/*/memory/` it finds
    - Write a managed bootstrap section to each `~/.claude*/CLAUDE.md`
    - Register the MCP server at user scope (`claude mcp add --scope user`)
@@ -81,7 +95,7 @@ If the hook is wired correctly, Claude will answer using facts from your memory 
 
 ## Known issues
 
-- **Unsigned binary** — the app is not code-signed with an Apple Developer certificate. macOS Gatekeeper will refuse to open it on first launch; use the right-click → Open bypass described above. Endpoint protection tools may also prompt on first launch or rebuild. If yours does, add the `Claude Memory Manager.app` path to its trusted applications list (one-time setup).
+- **Unsigned binary** — the app is not code-signed with an Apple Developer certificate. On first download, macOS puts a quarantine attribute on the file, and opening it shows a "damaged and can't be opened" error. This is **not** actual damage — it's just Apple's Gatekeeper being strict about unsigned apps. Strip the attribute with `xattr -dr com.apple.quarantine "/Applications/Claude Memory Manager.app"` (see the Install section above for details). Endpoint protection tools may also prompt on first launch; if yours does, add the `Claude Memory Manager.app` path to its trusted applications list (one-time setup). The long-term fix is code signing + notarization with an Apple Developer cert — that's not in this release.
 - **Plain DMG layout** — the DMG is a functional drag-to-Applications installer but doesn't have a custom background image or pre-positioned icons. You'll see the app and an Applications shortcut in the mounted volume; drag the app onto the shortcut. (The standard Tauri DMG prettification requires macOS Automation permission, which isn't reliably available in automated builds.)
 - **The managed section** in your existing `~/.claude*/CLAUDE.md` files is preserved between the `<!-- claude-memory-manager:start -->` and `<!-- claude-memory-manager:end -->` markers. Don't edit inside those markers — they'll be overwritten on re-register. Everything outside is left alone.
 

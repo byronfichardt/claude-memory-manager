@@ -233,6 +233,27 @@ rm -rf ~/.claude-memory-manager
 
 ## Troubleshooting
 
+### `"Claude Memory Manager is damaged and can't be opened"` on first launch
+
+macOS is **not** saying the file is actually corrupted — it's a quarantine flag that Apple added to unsigned apps downloaded from the internet. The fix is one command:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Claude Memory Manager.app"
+```
+
+(If the app isn't in `/Applications` yet, point at wherever the `.app` bundle lives — the mounted DMG path, `~/Downloads/`, etc.)
+
+After running that once, the app launches normally on double-click forever after. The command strips the `com.apple.quarantine` extended attribute that was added at download time.
+
+To verify you got the real file (not a tampered one), compare its SHA-256 against the values in the release checksums file:
+
+```bash
+shasum -a 256 ~/Downloads/claude-memory-manager-0.1.0-macos-arm64.dmg
+# should match the value in checksums.sha256 from the release
+```
+
+The long-term fix is code-signing + notarization with an Apple Developer certificate. That's not done yet — if you want to eliminate this prompt for users, add it to the build pipeline later.
+
 ### "I don't see memories being injected"
 
 - Check Settings → MCP Server and Settings → Auto memory injection. Both should show as registered/installed.
