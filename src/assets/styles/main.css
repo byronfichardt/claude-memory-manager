@@ -1,0 +1,87 @@
+@import "tailwindcss";
+
+@theme {
+  --color-surface: #13131f;
+  --color-surface-alt: #191928;
+  --color-surface-hover: #1e1e32;
+  --color-surface-active: #262640;
+  --color-border: #2a2a44;
+  --color-border-light: #35355a;
+  --color-text-primary: #e8e8f0;
+  --color-text-secondary: #9898b4;
+  --color-text-muted: #5e5e7e;
+  --color-accent: #c9a06c;
+  --color-accent-hover: #dab580;
+  --color-accent-muted: #a68454;
+  --color-type-user: #6b8fd4;
+  --color-type-feedback: #d49a6a;
+  --color-type-project: #5cc49a;
+  --color-type-reference: #a882cc;
+  --color-health-ok: #4ade80;
+  --color-health-warning: #f5b731;
+  --color-health-error: #ef6b6b;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-surface);
+  color: var(--color-text-primary);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+    system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-light);
+}
+
+/* Selection */
+::selection {
+  background: color-mix(in srgb, var(--color-accent) 30%, transparent);
+}
+
+/* Focus visible ring */
+:focus-visible {
+  outline: 1.5px solid var(--color-accent-muted);
+  outline-offset: 1px;
+}
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 1.5px solid var(--color-accent-muted);
+  outline-offset: 0;
+}
+
+/* Smooth transitions for interactive elements */
+button,
+a,
+input,
+select,
+textarea {
+  transition-property: background-color, border-color, color, opacity;
+  transition-duration: 0.1s;
+  transition-timing-function: ease;
+}
