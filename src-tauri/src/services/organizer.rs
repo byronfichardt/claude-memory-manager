@@ -5,7 +5,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::services::claude_api::ClaudeClient;
-use crate::store::{history, memories, topics};
+use crate::store::{history, memories, settings, topics};
+
+const SETTING_LAST_ORGANIZE_TS: &str = "last_organize_ts";
 
 const CLASSIFY_BATCH_SIZE: usize = 25;
 const CLASSIFY_MAX_CONTENT: usize = 300;
@@ -112,9 +114,17 @@ struct Merge {
 
 /// Run a full organization pass: classify untopiced memories, dedup within topics,
 /// then consolidate overlapping topics.
+///
+/// Only dedup/consolidate run on topics that changed since the last pass.
 pub async fn run_full_pass() -> Result<OrganizerReport, String> {
     let mut report = OrganizerReport::default();
     let client = ClaudeClient::new(None);
+
+    let last_ts: i64 = settings::get(SETTING_LAST_ORGANIZE_TS, "0")
+        .unwrap_or_else(|_| "0".to_string())
+        .parse()
+        .unwrap_or(0);
+    let now_ts = chrono::Utc::now().timestamp();
 
     // Phase 1: classify untopiced memories
     match classify_untopiced(&client, &mut report).await {
@@ -122,17 +132,22 @@ pub async fn run_full_pass() -> Result<OrganizerReport, String> {
         Err(e) => report.errors.push(format!("classify: {}", e)),
     }
 
-    // Phase 2: dedup within each topic
-    match dedup_all_topics(&client, &mut report).await {
+    // Phase 2: dedup only topics with new/updated memories since last pass
+    match dedup_changed_topics(&client, &mut report, last_ts).await {
         Ok(()) => {}
         Err(e) => report.errors.push(format!("dedup: {}", e)),
     }
 
-    // Phase 3: consolidate overlapping / single-member topics
-    match consolidate_topics(&client, &mut report).await {
-        Ok(()) => {}
-        Err(e) => report.errors.push(format!("consolidate: {}", e)),
+    // Phase 3: consolidate only if new classifications happened
+    if report.classified_count > 0 || !report.new_topics_created.is_empty() {
+        match consolidate_topics(&client, &mut report).await {
+            Ok(()) => {}
+            Err(e) => report.errors.push(format!("consolidate: {}", e)),
+        }
     }
+
+    // Record the timestamp for next pass
+    let _ = settings::set(SETTING_LAST_ORGANIZE_TS, &now_ts.to_string());
 
     Ok(report)
 }
@@ -358,18 +373,19 @@ fn apply_classifications(
     Ok(())
 }
 
-/// Dedup within each topic that has enough memories.
-pub async fn dedup_all_topics(
+/// Dedup only topics that have memories created/updated since `since_ts`.
+async fn dedup_changed_topics(
     client: &ClaudeClient,
     report: &mut OrganizerReport,
+    since_ts: i64,
 ) -> Result<(), String> {
-    let all_topics = topics::list_all()?;
+    let changed_topics = memories::list_topics_changed_since(since_ts)?;
+    if changed_topics.is_empty() {
+        return Ok(());
+    }
 
-    for topic in all_topics {
-        if (topic.memory_count as usize) < DEDUP_MIN_TOPIC_SIZE {
-            continue;
-        }
-        let mems = memories::list_by_topic(&topic.name)?;
+    for topic_name in changed_topics {
+        let mems = memories::list_by_topic(&topic_name)?;
         if mems.len() < DEDUP_MIN_TOPIC_SIZE {
             continue;
         }
@@ -377,15 +393,15 @@ pub async fn dedup_all_topics(
         match dedup_batch(client, &mems).await {
             Ok(merges) => {
                 for merge in merges {
-                    match apply_merge(&merge, &topic.name) {
+                    match apply_merge(&merge, &topic_name) {
                         Ok(()) => report.merged_count += 1,
                         Err(e) => report
                             .errors
-                            .push(format!("apply merge in {}: {}", topic.name, e)),
+                            .push(format!("apply merge in {}: {}", topic_name, e)),
                     }
                 }
             }
-            Err(e) => report.errors.push(format!("dedup {}: {}", topic.name, e)),
+            Err(e) => report.errors.push(format!("dedup {}: {}", topic_name, e)),
         }
     }
     Ok(())

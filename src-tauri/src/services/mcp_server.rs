@@ -13,7 +13,7 @@ use crate::store::memories;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "claude-memory-manager";
-const SERVER_VERSION: &str = "0.1.0";
+const SERVER_VERSION: &str = "0.1.1";
 
 #[derive(Deserialize)]
 struct JsonRpcRequest {
