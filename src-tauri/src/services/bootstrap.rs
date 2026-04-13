@@ -7,7 +7,19 @@ const END_MARKER: &str = "<!-- claude-memory-manager:end -->";
 const MANAGED_SECTION: &str = r#"<!-- claude-memory-manager:start -->
 ## Memory
 
-You have a persistent memory system. Relevant memories for each user message are automatically injected into your context as a `<memory-context>` block at the start of the turn — you don't need to fetch them. Use what's already there.
+You have a persistent memory system. Relevant memories for each user message are automatically injected into your context as a `<memory-context>` block at the start of the turn — you don't need to fetch them.
+
+### Using injected memory — THIS IS STEP ZERO
+
+The `<memory-context>` block is **authoritative context about this user and their projects**. It is not background reading. Before you answer, follow this order:
+
+1. **Scan `<memory-context>` first.** Before inspecting repo files, before proposing a procedure, before reasoning from file layout or filenames.
+2. **If any memory applies to the user's question, your answer must start from it.** Do not speculate from the code when memory already answers the question.
+3. **Never propose a procedure that contradicts a memory.** If a memory says "work apps deploy via GitHub Actions," do not suggest running `kamal deploy` or a local CLI deploy — even if the repo looks like it supports one. If the memory seems stale, say so and ask; do not silently override it.
+4. **For procedural questions** ("how would you deploy / ship / release / test / commit / run X"), explicitly reference which memory informed your answer, or state "no relevant memory found" before proceeding. Making the check visible prevents silent omissions.
+5. **Memories can be stale.** If a memory names a specific file, flag, or function, verify it still exists before recommending action on it. Trust current observation over recalled state when they conflict — and update the memory.
+
+Retrieval without enforcement is just decoration. Treat the memory block as load-bearing.
 
 ### Saving memories — BE AGGRESSIVE
 
