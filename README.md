@@ -23,7 +23,8 @@ An automated, self-organizing memory system for [Claude Code](https://code.claud
 2. **Injects relevant memories automatically** into every Claude Code session via a `UserPromptSubmit` hook — Claude sees matching memories before it processes each message.
 3. **Saves new memories** when Claude decides to (via an MCP `memory_add` tool) or when you use a `remember:` directive in your prompt.
 4. **Organizes automatically** — runs an AI-powered classification + deduplication pass on launch to keep the store clean.
-5. **Provides a tiny UI** for browsing, searching, and editing memories when you want to — the app is meant to be mostly invisible.
+5. **Lives in your menu bar** — runs as a macOS tray icon next to the clock. Right-click for "Open Dashboard" or "Quit". No Dock icon, no window clutter.
+6. **Provides a tiny UI** for browsing, searching, and editing memories when you want to — the app is meant to be mostly invisible.
 
 ## How it works
 
@@ -83,6 +84,15 @@ Type `remember: <anything>` (or `/remember ...`, `!remember ...`) in any Claude 
 
 Detects all `~/.claude*` directories automatically (`.claude`, `.claude-personal`, `.claude-work`, etc.), installs the hook + MCP server + bootstrap prompt in each one. Works out of the box for people running multiple Claude Code profiles via `CLAUDE_CONFIG_DIR`.
 
+### Menu bar app
+
+The app runs as a macOS menu bar icon (next to Wi-Fi, clock, etc.) — it doesn't appear in the Dock. Click the tray icon to open a context menu:
+
+- **Open Dashboard** — shows the main window
+- **Quit** — exits the app
+
+Closing the dashboard window hides it back to the tray rather than quitting. The hook and MCP server work independently of the window — they're invoked by Claude Code directly via the binary, so memory injection works whether the dashboard is open or not.
+
 ### Tiny UI
 
 - **Home**: topics grid with counts, one-click organize, status ribbon
@@ -90,7 +100,7 @@ Detects all `~/.claude*` directories automatically (`.claude`, `.claude-personal
 - **Search**: FTS5 search across everything with highlighted snippets
 - **Settings**: toggles for MCP registration, hook, auto-organize + per-config status table
 
-Most users should rarely need to open the app — it's the settings/maintenance panel for an otherwise invisible system.
+Most users should rarely need to open the dashboard — it's the settings/maintenance panel for an otherwise invisible system.
 
 ## Performance
 
@@ -128,7 +138,7 @@ The same binary has three modes, selected by command-line flag:
 
 | Mode           | How invoked                       | What it does                                           |
 |----------------|-----------------------------------|--------------------------------------------------------|
-| UI (default)   | `claude-memory-manager`           | Opens the Tauri window                                 |
+| UI (default)   | `claude-memory-manager`           | Menu bar tray icon + dashboard window                  |
 | MCP server     | `claude-memory-manager --mcp-server` | stdio JSON-RPC MCP protocol                          |
 | Hook           | `claude-memory-manager --hook`    | Reads JSON from stdin, writes context to stdout       |
 
@@ -158,7 +168,7 @@ cd ..
 ./src-tauri/target/release/claude-memory-manager
 ```
 
-On first launch, click **Get started**. The app will:
+On first launch, the app appears as a small icon in your menu bar (top-right of the screen, next to the clock). Click it and select "Open Dashboard", then click **Get started**. The app will:
 1. Scan `~/.claude*/projects/*/memory/` for existing memory files
 2. Ingest them into `~/.claude-memory-manager/memories.db`
 3. Write a managed section to each `~/.claude*/CLAUDE.md`
