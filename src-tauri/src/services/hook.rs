@@ -12,7 +12,7 @@
 
 use std::io::{self, Read, Write};
 
-use crate::store::{self, memories};
+use crate::store::{self, edges, memories};
 
 const MAX_RESULTS: u32 = 5;
 const MAX_SNIPPET_CHARS: usize = 300;
@@ -79,15 +79,14 @@ pub fn run() -> Result<(), String> {
         }
     }
 
-    // Search the memory store using the prompt as a query
-    let hits = memories::search(&event.prompt, Some(MAX_RESULTS))
-        .map_err(|e| format!("search: {}", e))?;
+    // Hybrid retrieval: FTS5 + graph expansion + re-ranking
+    let final_hits = hybrid_search(&event.prompt)?;
 
-    if !hits.is_empty() {
+    if !final_hits.is_empty() {
         out.push_str("<memory-context>\n");
         out.push_str("Relevant memories from your persistent memory store (retrieved automatically):\n\n");
 
-        for (i, hit) in hits.iter().enumerate() {
+        for (i, hit) in final_hits.iter().enumerate() {
             let topic = hit.topic.as_deref().unwrap_or("untopiced");
             out.push_str(&format!("{}. **{}** _{}_", i + 1, hit.title, topic));
             if !hit.description.is_empty() {
@@ -104,6 +103,12 @@ pub fn run() -> Result<(), String> {
         }
 
         out.push_str("</memory-context>\n");
+
+        // Strengthen co-access edges between results (fire-and-forget)
+        if final_hits.len() > 1 {
+            let ids: Vec<&str> = final_hits.iter().map(|h| h.id.as_str()).collect();
+            strengthen_co_access(&ids);
+        }
     }
 
     if out.is_empty() {
@@ -119,6 +124,171 @@ pub fn run() -> Result<(), String> {
     handle.flush().map_err(|e| format!("flush: {}", e))?;
 
     Ok(())
+}
+
+const FTS_OVERFETCH: u32 = 10;
+const FTS_WEIGHT: f64 = 0.7;
+const GRAPH_WEIGHT: f64 = 0.3;
+const CO_ACCESS_INITIAL_WEIGHT: f64 = 0.1;
+const CO_ACCESS_DELTA: f64 = 0.05;
+
+/// Hybrid search: FTS5 keyword search + 1-hop graph expansion + re-ranking.
+///
+/// 1. Over-fetch FTS candidates (10 instead of 5)
+/// 2. Walk 1-hop graph neighbors of FTS hits
+/// 3. Fetch any neighbor memories not already in FTS results
+/// 4. Re-rank using combined FTS + graph score
+/// 5. Return top MAX_RESULTS
+fn hybrid_search(prompt: &str) -> Result<Vec<memories::SearchHit>, String> {
+    // Step 1: Get FTS candidates (over-fetch for re-ranking headroom)
+    let fts_hits = memories::search(prompt, Some(FTS_OVERFETCH))
+        .map_err(|e| format!("search: {}", e))?;
+
+    if fts_hits.is_empty() {
+        return Ok(fts_hits);
+    }
+
+    // Step 2: Get 1-hop graph neighbors
+    let fts_ids: Vec<&str> = fts_hits.iter().map(|h| h.id.as_str()).collect();
+    let neighbor_edges = edges::get_neighbors_batch(&fts_ids).unwrap_or_default();
+
+    // If no edges exist yet, just return the top FTS hits directly
+    if neighbor_edges.is_empty() {
+        return Ok(fts_hits.into_iter().take(MAX_RESULTS as usize).collect());
+    }
+
+    // Normalize FTS scores (BM25 in SQLite FTS5: lower = better, all negative)
+    let min_score = fts_hits.iter().map(|h| h.score).fold(f64::INFINITY, f64::min);
+    let max_score = fts_hits.iter().map(|h| h.score).fold(f64::NEG_INFINITY, f64::max);
+    let score_range = (max_score - min_score).abs();
+
+    let normalize_fts = |score: f64| -> f64 {
+        if score_range < f64::EPSILON {
+            1.0
+        } else {
+            // Invert because lower BM25 = better match
+            1.0 - ((score - min_score) / score_range)
+        }
+    };
+
+    // Build a map of memory_id -> normalized FTS score
+    let mut fts_score_map: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
+    for hit in &fts_hits {
+        fts_score_map.insert(&hit.id, normalize_fts(hit.score));
+    }
+
+    // Step 3: Find neighbor memory IDs not already in FTS results
+    let fts_id_set: std::collections::HashSet<&str> = fts_ids.iter().copied().collect();
+    let mut neighbor_ids: Vec<String> = Vec::new();
+    for edge in &neighbor_edges {
+        let other = if fts_id_set.contains(edge.source_id.as_str()) {
+            &edge.target_id
+        } else {
+            &edge.source_id
+        };
+        if !fts_id_set.contains(other.as_str()) && !neighbor_ids.contains(other) {
+            neighbor_ids.push(other.clone());
+        }
+    }
+
+    // Step 4: Compute graph boost for all candidates
+    // graph_boost(memory) = avg(edge.weight * connected_fts_hit_score) for edges connecting to FTS hits
+    let mut graph_boost: std::collections::HashMap<String, (f64, usize)> = std::collections::HashMap::new();
+
+    for edge in &neighbor_edges {
+        // For each edge, determine which end is an FTS hit and compute boost for the other end
+        let (fts_end, other_end) = if fts_score_map.contains_key(edge.source_id.as_str()) {
+            (edge.source_id.as_str(), edge.target_id.as_str())
+        } else if fts_score_map.contains_key(edge.target_id.as_str()) {
+            (edge.target_id.as_str(), edge.source_id.as_str())
+        } else {
+            continue;
+        };
+
+        let fts_score = fts_score_map.get(fts_end).copied().unwrap_or(0.0);
+        let boost_value = edge.weight * fts_score;
+
+        let entry = graph_boost.entry(other_end.to_string()).or_insert((0.0, 0));
+        entry.0 += boost_value;
+        entry.1 += 1;
+
+        // Also boost the FTS hit itself (bidirectional benefit)
+        let entry = graph_boost.entry(fts_end.to_string()).or_insert((0.0, 0));
+        entry.0 += edge.weight * 0.5; // smaller self-boost
+        entry.1 += 1;
+    }
+
+    // Step 5: Score and rank all candidates
+    struct ScoredHit {
+        hit: memories::SearchHit,
+        combined_score: f64,
+    }
+
+    let mut scored: Vec<ScoredHit> = Vec::new();
+
+    // Score FTS hits
+    for hit in fts_hits {
+        let norm_fts = normalize_fts(hit.score);
+        let g_boost = graph_boost
+            .get(&hit.id)
+            .map(|(sum, count)| if *count > 0 { sum / *count as f64 } else { 0.0 })
+            .unwrap_or(0.0);
+        let combined = FTS_WEIGHT * norm_fts + GRAPH_WEIGHT * g_boost;
+        scored.push(ScoredHit { hit, combined_score: combined });
+    }
+
+    // Fetch and score graph-only neighbors (no FTS signal)
+    if !neighbor_ids.is_empty() {
+        let id_refs: Vec<&str> = neighbor_ids.iter().map(|s| s.as_str()).collect();
+        if let Ok(neighbor_memories) = memories::get_by_ids(&id_refs) {
+            for mem in neighbor_memories {
+                let g_boost = graph_boost
+                    .get(&mem.id)
+                    .map(|(sum, count)| if *count > 0 { sum / *count as f64 } else { 0.0 })
+                    .unwrap_or(0.0);
+                let combined = GRAPH_WEIGHT * g_boost; // No FTS signal
+
+                // Convert Memory to SearchHit for uniform output
+                let snippet = truncate_chars(&mem.content, MAX_SNIPPET_CHARS);
+                scored.push(ScoredHit {
+                    hit: memories::SearchHit {
+                        id: mem.id,
+                        title: mem.title,
+                        description: mem.description,
+                        snippet,
+                        topic: mem.topic,
+                        memory_type: mem.memory_type,
+                        score: 0.0, // no FTS score
+                    },
+                    combined_score: combined,
+                });
+            }
+        }
+    }
+
+    // Sort by combined score (descending)
+    scored.sort_by(|a, b| b.combined_score.partial_cmp(&a.combined_score).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Return top MAX_RESULTS
+    let results: Vec<memories::SearchHit> = scored
+        .into_iter()
+        .take(MAX_RESULTS as usize)
+        .map(|s| s.hit)
+        .collect();
+
+    Ok(results)
+}
+
+/// Create or strengthen co-access edges between memories that appeared together in results.
+fn strengthen_co_access(ids: &[&str]) {
+    for i in 0..ids.len() {
+        for j in (i + 1)..ids.len() {
+            // Insert with low initial weight (no-op if already exists with higher weight)
+            let _ = edges::insert(ids[i], ids[j], "relates-to", CO_ACCESS_INITIAL_WEIGHT, "co_access");
+            // Bump weight for repeated co-occurrence
+            let _ = edges::strengthen(ids[i], ids[j], "relates-to", CO_ACCESS_DELTA);
+        }
+    }
 }
 
 /// Detects explicit save-to-memory directives at the start of a user prompt.

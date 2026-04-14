@@ -92,10 +92,32 @@ export interface HookStatus {
   per_config: ConfigDirHookStatus[];
 }
 
+export interface MemoryEdge {
+  id: number;
+  source_id: string;
+  target_id: string;
+  edge_type: string;
+  weight: number;
+  source_origin: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface RelatedMemoryEntry {
+  edge: MemoryEdge;
+  memory: Memory;
+}
+
+export interface RelatedMemoriesResponse {
+  edges: MemoryEdge[];
+  related: RelatedMemoryEntry[];
+}
+
 export interface OrganizerReport {
   classified_count: number;
   new_topics_created: string[];
   merged_count: number;
+  edges_created: number;
   errors: string[];
 }
 

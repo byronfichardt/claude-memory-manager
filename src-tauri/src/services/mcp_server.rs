@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
-use crate::store::memories;
+use crate::store::{edges, memories};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "claude-memory-manager";
-const SERVER_VERSION: &str = "0.1.1";
+const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Deserialize)]
 struct JsonRpcRequest {
@@ -166,7 +166,7 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "memory_add",
-                "description": "Save a new memory to the store. Call this when you learn something worth preserving: a user correction, a project convention, a debugging finding, a stated preference. Be specific and include enough context that the memory is useful in future sessions.",
+                "description": "Save a new memory to the store. You MUST call this proactively — don't wait for the user to ask. Save user corrections, project conventions, debugging findings, stated preferences, architecture decisions, workflow discoveries, and project state changes. A typical session should produce 3-10 memories. Be specific and include enough context that the memory is useful in future sessions.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -226,6 +226,25 @@ fn handle_tools_list() -> Value {
                         }
                     }
                 }
+            },
+            {
+                "name": "memory_related",
+                "description": "Get memories related to a specific memory via the relationship graph. Returns graph neighbors up to N hops. Useful for exploring connections between memories and discovering related context.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "The memory UUID to find relationships for"
+                        },
+                        "depth": {
+                            "type": "integer",
+                            "description": "How many hops to traverse (1 = direct neighbors, 2 = neighbors of neighbors). Default 1, max 3.",
+                            "default": 1
+                        }
+                    },
+                    "required": ["id"]
+                }
             }
         ]
     })
@@ -243,6 +262,7 @@ fn handle_tools_call(params: Value) -> Result<Value, (i32, String)> {
         "memory_add" => tool_memory_add(arguments),
         "memory_get" => tool_memory_get(arguments),
         "memory_list" => tool_memory_list(arguments),
+        "memory_related" => tool_memory_related(arguments),
         _ => Err(format!("Unknown tool: {}", name)),
     };
 
@@ -336,6 +356,83 @@ fn tool_memory_get(args: Value) -> Result<String, String> {
         memory.description,
         memory.content
     ))
+}
+
+fn tool_memory_related(args: Value) -> Result<String, String> {
+    let id = args
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or("id required")?;
+    let depth = args
+        .get("depth")
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
+        .min(3) as u32;
+
+    // Verify the source memory exists
+    let source = memories::get(id)?.ok_or_else(|| format!("Memory {} not found", id))?;
+
+    let edge_list = if depth <= 1 {
+        edges::get_neighbors(id)?
+    } else {
+        edges::get_neighbors_deep(id, depth)?
+    };
+
+    if edge_list.is_empty() {
+        return Ok(format!("No related memories found for \"{}\"", source.title));
+    }
+
+    // Collect unique connected memory IDs
+    let mut neighbor_ids: Vec<String> = Vec::new();
+    for edge in &edge_list {
+        for candidate in [&edge.source_id, &edge.target_id] {
+            if candidate != id && !neighbor_ids.contains(candidate) {
+                neighbor_ids.push(candidate.clone());
+            }
+        }
+    }
+
+    // Fetch connected memories
+    let id_refs: Vec<&str> = neighbor_ids.iter().map(|s| s.as_str()).collect();
+    let neighbor_memories = memories::get_by_ids(&id_refs)?;
+    let mem_map: std::collections::HashMap<&str, &memories::Memory> = neighbor_memories
+        .iter()
+        .map(|m| (m.id.as_str(), m))
+        .collect();
+
+    let mut out = format!(
+        "Related memories for \"{}\" ({} edges, depth {}):\n\n",
+        source.title,
+        edge_list.len(),
+        depth
+    );
+
+    for edge in &edge_list {
+        let other_id = if edge.source_id == id {
+            &edge.target_id
+        } else {
+            &edge.source_id
+        };
+
+        let direction = if edge.source_id == id {
+            format!("--[{}]-->", edge.edge_type)
+        } else {
+            format!("<--[{}]--", edge.edge_type)
+        };
+
+        if let Some(mem) = mem_map.get(other_id.as_str()) {
+            out.push_str(&format!(
+                "- {} {} (weight: {:.0}%)\n  id: {}\n  {}\n\n",
+                direction,
+                mem.title,
+                edge.weight * 100.0,
+                mem.id,
+                mem.description,
+            ));
+        }
+    }
+
+    Ok(out)
 }
 
 fn tool_memory_list(args: Value) -> Result<String, String> {

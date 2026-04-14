@@ -11,6 +11,7 @@ import type {
   ConfigDirHookStatus,
   OrganizerReport,
   HistoryEntry,
+  RelatedMemoriesResponse,
 } from "@/types";
 
 export function useTauri() {
@@ -55,6 +56,8 @@ export function useTauri() {
         topic,
       }),
     deleteMemory: (id: string) => invoke<void>("store_delete_memory", { id }),
+    getRelatedMemories: (id: string, depth?: number) =>
+      invoke<RelatedMemoriesResponse>("get_related_memories", { id, depth }),
 
     // Topics
     listTopics: () => invoke<Topic[]>("list_topics"),

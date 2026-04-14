@@ -23,13 +23,21 @@ Retrieval without enforcement is just decoration. Treat the memory block as load
 
 ### Saving memories — BE AGGRESSIVE
 
-Call `memory_add` IMMEDIATELY when any of these happen. Don't wait for permission, don't ask, just save:
+You MUST call `memory_add` proactively throughout every session. Don't wait for permission, don't ask, just save. A typical working session should produce 3-10 memories. If you finish a session having saved zero, you failed at memory management.
+
+**Save IMMEDIATELY when any of these happen:**
 
 - **User correction**: "no, actually...", "don't do X", "that's wrong because...", "stop doing Y"
 - **Stated preference or convention**: "we always use Y", "I prefer Z", "never do W", "our style is..."
 - **Non-obvious project fact**: file layouts, service names, credentials locations, IP addresses, how subsystems connect
 - **Debugging finding**: a gotcha you hit and solved, an environment-specific issue, a version mismatch
 - **Cross-session context** the user told you: their role, their goals, their team conventions
+- **Architecture decision**: why something was built a certain way, tradeoffs considered, alternatives rejected
+- **Project state change**: new feature added, migration run, dependency updated, config changed
+- **Workflow discovery**: how to run tests, deploy, build — anything that would help in a future session
+- **Bug or issue context**: what broke, why, how it was fixed — especially environment-specific issues
+
+**Self-check at natural breakpoints** (after finishing a task, before a commit, at session end): "Did I learn anything this session that would be useful next time?" If yes and you haven't saved it, save it now.
 
 Rules for good memories:
 - Be specific and terse. Prefer several small focused memories over one big one.

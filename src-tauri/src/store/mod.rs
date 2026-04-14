@@ -1,3 +1,4 @@
+pub mod edges;
 pub mod history;
 pub mod memories;
 pub mod settings;
@@ -132,7 +133,38 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
             .map_err(|e| format!("bump v1: {}", e))?;
     }
 
+    if version < 2 {
+        apply_migration_v2(conn)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (2)", [])
+            .map_err(|e| format!("bump v2: {}", e))?;
+    }
+
     Ok(())
+}
+
+fn apply_migration_v2(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE memory_edges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            edge_type TEXT NOT NULL,
+            weight REAL NOT NULL DEFAULT 0.5,
+            source_origin TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY(source_id) REFERENCES memories(id) ON DELETE CASCADE,
+            FOREIGN KEY(target_id) REFERENCES memories(id) ON DELETE CASCADE,
+            UNIQUE(source_id, target_id, edge_type)
+        );
+
+        CREATE INDEX idx_edges_source ON memory_edges(source_id);
+        CREATE INDEX idx_edges_target ON memory_edges(target_id);
+        CREATE INDEX idx_edges_type ON memory_edges(edge_type);
+        "#,
+    )
+    .map_err(|e| format!("migration v2: {}", e))
 }
 
 fn apply_migration_v1(conn: &Connection) -> Result<(), String> {

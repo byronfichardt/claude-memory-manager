@@ -5,15 +5,18 @@
 use serde::{Deserialize, Serialize};
 
 use crate::services::claude_api::ClaudeClient;
-use crate::store::{history, memories, settings, topics};
+use crate::store::{edges, history, memories, settings, topics};
 
 const SETTING_LAST_ORGANIZE_TS: &str = "last_organize_ts";
+const SETTING_INITIAL_RELATE_DONE: &str = "initial_relate_done";
 
 const CLASSIFY_BATCH_SIZE: usize = 25;
 const CLASSIFY_MAX_CONTENT: usize = 300;
 const DEDUP_MAX_CONTENT: usize = 1000;
 const DEDUP_MIN_TOPIC_SIZE: usize = 2;
 const CONSOLIDATE_SAMPLE_PER_TOPIC: usize = 6;
+const RELATE_BATCH_SIZE: usize = 20;
+const RELATE_MAX_CONTENT: usize = 400;
 
 const CLASSIFY_SYSTEM: &str = r#"You classify memories from a knowledge base into topics.
 
@@ -52,6 +55,25 @@ Respond with ONLY valid JSON (no prose, no markdown fences):
 
 If nothing should merge, return {"merges": []}."#;
 
+const RELATE_SYSTEM: &str = r#"You identify semantic relationships between memories in a knowledge base.
+
+For each pair of memories that have a meaningful relationship, output an edge.
+
+Edge types:
+- "relates-to": memories discuss related concepts or share common context
+- "supersedes": memory A replaces/updates memory B (B is outdated)
+- "depends-on": memory A only makes sense if you also know memory B
+- "contradicts": memories contain conflicting information
+
+Rules:
+1. Only emit edges where the relationship is clear and useful for retrieval.
+2. Don't emit "relates-to" for every pair in the same topic — only genuinely connected ones.
+3. For "supersedes" and "contradicts", order matters: source supersedes/contradicts target.
+4. Aim for precision over recall — fewer strong edges beat many weak ones.
+
+Respond with ONLY valid JSON (no prose, no markdown fences):
+{"edges": [{"source_id": "id1", "target_id": "id2", "edge_type": "relates-to"}]}"#;
+
 const DEDUP_SYSTEM: &str = r#"You identify groups of memories that are near-duplicates — different phrasings of the same information, or memories that overlap enough that merging would lose nothing.
 
 Rules:
@@ -68,6 +90,7 @@ pub struct OrganizerReport {
     pub classified_count: usize,
     pub new_topics_created: Vec<String>,
     pub merged_count: usize,
+    pub edges_created: usize,
     pub consolidated_topics: Vec<String>,
     pub errors: Vec<String>,
 }
@@ -95,6 +118,19 @@ struct AiClassifyResponse {
 struct Assignment {
     id: String,
     topic: String,
+}
+
+#[derive(Deserialize)]
+struct AiRelateResponse {
+    #[serde(default)]
+    edges: Vec<AiEdge>,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+struct AiEdge {
+    source_id: String,
+    target_id: String,
+    edge_type: String,
 }
 
 #[derive(Deserialize)]
@@ -130,6 +166,26 @@ pub async fn run_full_pass() -> Result<OrganizerReport, String> {
     match classify_untopiced(&client, &mut report).await {
         Ok(()) => {}
         Err(e) => report.errors.push(format!("classify: {}", e)),
+    }
+
+    // Phase 1.5: discover relationships.
+    // First run: relate ALL topics to seed the graph (one-time).
+    // Subsequent runs: only relate topics that got new classifications this pass.
+    let initial_relate_done = settings::get_bool(SETTING_INITIAL_RELATE_DONE, false)
+        .unwrap_or(false);
+
+    if !initial_relate_done {
+        match relate_all_topics(&client, &mut report).await {
+            Ok(()) => {
+                let _ = settings::set_bool(SETTING_INITIAL_RELATE_DONE, true);
+            }
+            Err(e) => report.errors.push(format!("relate (initial): {}", e)),
+        }
+    } else if report.classified_count > 0 {
+        match relate_newly_classified_topics(&client, &mut report).await {
+            Ok(()) => {}
+            Err(e) => report.errors.push(format!("relate: {}", e)),
+        }
     }
 
     // Phase 2: dedup only topics with new/updated memories since last pass
@@ -487,6 +543,7 @@ pub fn undo_last() -> Result<String, String> {
     match action {
         "merge" => undo_merge(&snapshot, &entry)?,
         "consolidate" => undo_consolidate(&snapshot)?,
+        "relate" => undo_relate(&snapshot)?,
         _ => return Err(format!("unknown action: {}", action)),
     };
 
@@ -582,6 +639,175 @@ fn undo_merge(
             topic,
             source: Some("restored_by_undo".to_string()),
         });
+    }
+
+    Ok(())
+}
+
+/// Undo a relate pass by removing the edges that were created.
+fn undo_relate(snapshot: &serde_json::Value) -> Result<(), String> {
+    let ai_edges = snapshot
+        .get("edges")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "snapshot missing edges list".to_string())?;
+
+    for edge_val in ai_edges {
+        let source_id = edge_val.get("source_id").and_then(|v| v.as_str()).unwrap_or("");
+        let target_id = edge_val.get("target_id").and_then(|v| v.as_str()).unwrap_or("");
+        let edge_type = edge_val.get("edge_type").and_then(|v| v.as_str()).unwrap_or("");
+
+        if source_id.is_empty() || target_id.is_empty() || edge_type.is_empty() {
+            continue;
+        }
+
+        // Delete the specific edge by its unique constraint fields
+        let _ = crate::store::with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM memory_edges WHERE source_id = ?1 AND target_id = ?2 AND edge_type = ?3 AND source_origin = 'ai_discovered'",
+                rusqlite::params![source_id, target_id, edge_type],
+            )
+            .map_err(|e| format!("undo relate edge: {}", e))?;
+            Ok(())
+        });
+    }
+
+    Ok(())
+}
+
+/// Initial full relate pass — runs once to seed the graph across all topics.
+async fn relate_all_topics(
+    client: &ClaudeClient,
+    report: &mut OrganizerReport,
+) -> Result<(), String> {
+    let all_topics = topics::list_all()?;
+
+    for topic in &all_topics {
+        let mems = memories::list_by_topic(&topic.name)?;
+        if mems.len() < 2 {
+            continue;
+        }
+
+        for chunk in mems.chunks(RELATE_BATCH_SIZE) {
+            match relate_batch(client, chunk).await {
+                Ok(ai_edges) => {
+                    if !ai_edges.is_empty() {
+                        apply_discovered_edges(&ai_edges, &topic.name, report)?;
+                    }
+                }
+                Err(e) => report.errors.push(format!("relate {}: {}", topic.name, e)),
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Discover relationships between memories within topics that received
+/// new classifications this pass. Only processes topics from the report's
+/// new_topics_created list plus any existing topics that got new members.
+async fn relate_newly_classified_topics(
+    client: &ClaudeClient,
+    report: &mut OrganizerReport,
+) -> Result<(), String> {
+    // Collect unique topic names that were touched by classification
+    let mut topics_to_relate: Vec<String> = report.new_topics_created.clone();
+
+    // Also check existing topics that may have received new classifications
+    // by scanning for topics with recently updated memories (just the last few seconds)
+    let recent_ts = chrono::Utc::now().timestamp() - 30; // last 30 seconds
+    if let Ok(changed) = memories::list_topics_changed_since(recent_ts) {
+        for t in changed {
+            if !topics_to_relate.contains(&t) {
+                topics_to_relate.push(t);
+            }
+        }
+    }
+
+    for topic_name in &topics_to_relate {
+        let mems = memories::list_by_topic(topic_name)?;
+        if mems.len() < 2 {
+            continue;
+        }
+
+        // Process in batches
+        for chunk in mems.chunks(RELATE_BATCH_SIZE) {
+            match relate_batch(client, chunk).await {
+                Ok(ai_edges) => {
+                    if !ai_edges.is_empty() {
+                        apply_discovered_edges(&ai_edges, topic_name, report)?;
+                    }
+                }
+                Err(e) => report.errors.push(format!("relate {}: {}", topic_name, e)),
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn relate_batch(
+    client: &ClaudeClient,
+    batch: &[memories::Memory],
+) -> Result<Vec<AiEdge>, String> {
+    let mut prompt = String::new();
+    prompt.push_str("Identify relationships between these memories:\n\n");
+
+    for m in batch {
+        prompt.push_str(&format!("[id={}]\n", m.id));
+        prompt.push_str(&format!("title: {}\n", m.title));
+        if !m.description.is_empty() {
+            prompt.push_str(&format!("description: {}\n", m.description));
+        }
+        let content_preview = truncate(&m.content, RELATE_MAX_CONTENT);
+        prompt.push_str(&format!("content: {}\n\n", content_preview));
+    }
+
+    let response = client.analyze(RELATE_SYSTEM, &prompt).await?;
+    let json = extract_json(&response.text);
+    let parsed: AiRelateResponse = serde_json::from_str(json)
+        .map_err(|e| format!("parse relate response: {} (raw: {})", e, truncate(json, 200)))?;
+
+    Ok(parsed.edges)
+}
+
+fn apply_discovered_edges(
+    ai_edges: &[AiEdge],
+    topic: &str,
+    report: &mut OrganizerReport,
+) -> Result<(), String> {
+    // Snapshot before applying (for undo)
+    let snapshot = serde_json::json!({
+        "action": "relate",
+        "topic": topic,
+        "edges": ai_edges,
+    });
+    history::record("relate", snapshot)?;
+
+    let valid_types = ["relates-to", "supersedes", "depends-on", "contradicts"];
+
+    for ai_edge in ai_edges {
+        let edge_type = ai_edge.edge_type.trim().to_lowercase();
+        if !valid_types.contains(&edge_type.as_str()) {
+            continue;
+        }
+
+        // Verify both memories exist
+        let source_exists = memories::get(&ai_edge.source_id)?.is_some();
+        let target_exists = memories::get(&ai_edge.target_id)?.is_some();
+        if !source_exists || !target_exists {
+            continue;
+        }
+
+        match edges::insert(
+            &ai_edge.source_id,
+            &ai_edge.target_id,
+            &edge_type,
+            0.5,
+            "ai_discovered",
+        ) {
+            Ok(_) => report.edges_created += 1,
+            Err(e) => report.errors.push(format!("edge insert: {}", e)),
+        }
     }
 
     Ok(())

@@ -1,3 +1,5 @@
+use tauri::Manager;
+
 mod commands;
 mod models;
 mod services;
@@ -47,7 +49,64 @@ pub fn run() {
             commands::autopilot::get_hook_status,
             commands::autopilot::install_hook,
             commands::autopilot::uninstall_hook,
+            commands::autopilot::get_related_memories,
         ])
+        .setup(|app| {
+            // On macOS, set as accessory app so it doesn't appear in the Dock
+            #[cfg(target_os = "macos")]
+            {
+                app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
+
+            // Build a right-click context menu for the tray icon
+            let menu = tauri::menu::MenuBuilder::new(app)
+                .item(&tauri::menu::MenuItem::with_id(
+                    app,
+                    "open_dashboard",
+                    "Open Dashboard",
+                    true,
+                    None::<&str>,
+                )?)
+                .separator()
+                .item(&tauri::menu::MenuItem::with_id(
+                    app,
+                    "quit",
+                    "Quit",
+                    true,
+                    None::<&str>,
+                )?)
+                .build()?;
+
+            if let Some(tray) = app.tray_by_id("main") {
+                tray.set_menu(Some(menu))?;
+                let _ = tray.set_show_menu_on_left_click(true);
+
+                let app_handle = app.handle().clone();
+                tray.on_menu_event(move |_app, event| {
+                    match event.id().as_ref() {
+                        "open_dashboard" => {
+                            if let Some(window) = app_handle.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "quit" => {
+                            std::process::exit(0);
+                        }
+                        _ => {}
+                    }
+                });
+            }
+
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Intercept close to hide the window instead of quitting
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

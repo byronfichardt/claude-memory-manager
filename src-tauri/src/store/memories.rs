@@ -2,7 +2,7 @@ use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::with_conn;
+use super::{edges, settings, with_conn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Memory {
@@ -154,11 +154,17 @@ pub fn update(
         )
         .map_err(|e| format!("update: {}", e))?;
 
+        // Flag connected memories for staleness review
+        flag_dependents_for_review(id);
+
         get_by_id(conn, id)?.ok_or_else(|| format!("memory {} not found after update", id))
     })
 }
 
 pub fn delete(id: &str) -> Result<(), String> {
+    // Flag dependents before deletion (CASCADE will remove edges)
+    flag_dependents_for_review(id);
+
     with_conn(|conn| {
         conn.execute("DELETE FROM memories WHERE id = ?1", params![id])
             .map_err(|e| format!("delete: {}", e))?;
@@ -224,6 +230,80 @@ pub fn list_topics_changed_since(since_ts: i64) -> Result<Vec<String>, String> {
         let rows = stmt
             .query_map(params![since_ts], |row| row.get::<_, String>(0))
             .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    })
+}
+
+const SETTING_STALE_REVIEW_QUEUE: &str = "stale_review_queue";
+
+/// Flag memories connected via "depends-on" or "supersedes" edges for staleness review.
+/// Stores flagged IDs as a JSON array in the settings table.
+fn flag_dependents_for_review(memory_id: &str) {
+    let connected = match edges::get_neighbors(memory_id) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let mut flagged_ids: Vec<String> = Vec::new();
+    for edge in &connected {
+        if edge.edge_type == "depends-on" || edge.edge_type == "supersedes" {
+            let other = if edge.source_id == memory_id {
+                &edge.target_id
+            } else {
+                &edge.source_id
+            };
+            if !flagged_ids.contains(other) {
+                flagged_ids.push(other.clone());
+            }
+        }
+    }
+
+    if flagged_ids.is_empty() {
+        return;
+    }
+
+    // Merge with existing queue
+    let existing = settings::get(SETTING_STALE_REVIEW_QUEUE, "[]").unwrap_or_else(|_| "[]".to_string());
+    let mut queue: Vec<String> = serde_json::from_str(&existing).unwrap_or_default();
+    for id in flagged_ids {
+        if !queue.contains(&id) {
+            queue.push(id);
+        }
+    }
+
+    let _ = settings::set(SETTING_STALE_REVIEW_QUEUE, &serde_json::to_string(&queue).unwrap_or_default());
+}
+
+/// Fetch multiple memories by ID in a single query.
+/// Used by the hook for batch-fetching graph neighbors.
+pub fn get_by_ids(ids: &[&str]) -> Result<Vec<Memory>, String> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    with_conn(|conn| {
+        let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "SELECT * FROM memories WHERE id IN ({})",
+            placeholders.join(", ")
+        );
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("prepare get_by_ids: {}", e))?;
+
+        let param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
+            ids.iter().map(|id| Box::new(id.to_string()) as Box<dyn rusqlite::types::ToSql>).collect();
+        let refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|b| b.as_ref()).collect();
+
+        let rows = stmt
+            .query_map(refs.as_slice(), row_to_memory)
+            .map_err(|e| format!("query get_by_ids: {}", e))?;
+
         let mut out = Vec::new();
         for r in rows {
             out.push(r.map_err(|e| e.to_string())?);

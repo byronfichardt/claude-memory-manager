@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::process::Command;
 
 use crate::services::{bootstrap, ingestion, organizer};
-use crate::store::{history, memories, settings, topics};
+use crate::store::{edges, history, memories, settings, topics};
 
 const MCP_SERVER_NAME: &str = "claude-memory-manager";
 const SETTING_AUTO_ORGANIZE: &str = "auto_organize";
@@ -378,6 +378,67 @@ pub fn uninstall_hook() -> Result<Vec<ConfigDirHookStatus>, String> {
         })
         .collect();
     Ok(results)
+}
+
+#[derive(Serialize)]
+pub struct RelatedMemoryEntry {
+    pub edge: edges::MemoryEdge,
+    pub memory: memories::Memory,
+}
+
+#[derive(Serialize)]
+pub struct RelatedMemoriesResponse {
+    pub edges: Vec<edges::MemoryEdge>,
+    pub related: Vec<RelatedMemoryEntry>,
+}
+
+#[tauri::command]
+pub fn get_related_memories(id: String, depth: Option<u32>) -> Result<RelatedMemoriesResponse, String> {
+    let depth = depth.unwrap_or(1).min(3);
+
+    let edge_list = if depth <= 1 {
+        edges::get_neighbors(&id)?
+    } else {
+        edges::get_neighbors_deep(&id, depth)?
+    };
+
+    // Collect unique neighbor IDs
+    let mut neighbor_ids: Vec<String> = Vec::new();
+    for edge in &edge_list {
+        for candidate in [&edge.source_id, &edge.target_id] {
+            if candidate.as_str() != id && !neighbor_ids.contains(candidate) {
+                neighbor_ids.push(candidate.clone());
+            }
+        }
+    }
+
+    // Fetch neighbor memories
+    let id_refs: Vec<&str> = neighbor_ids.iter().map(|s| s.as_str()).collect();
+    let neighbor_memories = memories::get_by_ids(&id_refs)?;
+    let mem_map: std::collections::HashMap<String, memories::Memory> = neighbor_memories
+        .into_iter()
+        .map(|m| (m.id.clone(), m))
+        .collect();
+
+    let mut related = Vec::new();
+    for edge in &edge_list {
+        let other_id = if edge.source_id == id {
+            &edge.target_id
+        } else {
+            &edge.source_id
+        };
+        if let Some(mem) = mem_map.get(other_id) {
+            related.push(RelatedMemoryEntry {
+                edge: edge.clone(),
+                memory: mem.clone(),
+            });
+        }
+    }
+
+    Ok(RelatedMemoriesResponse {
+        edges: edge_list,
+        related,
+    })
 }
 
 #[tauri::command]

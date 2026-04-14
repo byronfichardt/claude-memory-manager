@@ -4,7 +4,7 @@ import { useRouter } from "vue-router";
 import { useAppStore } from "@/stores/app";
 import { useTauri } from "@/composables/useTauri";
 import MarkdownBody from "@/components/MarkdownBody.vue";
-import type { Memory } from "@/types";
+import type { Memory, RelatedMemoryEntry } from "@/types";
 
 const props = defineProps<{ name: string }>();
 const router = useRouter();
@@ -23,6 +23,7 @@ const editTopic = ref("");
 const originalSnapshot = ref<Memory | null>(null);
 const saving = ref(false);
 const saveError = ref("");
+const relatedMap = ref<Record<string, RelatedMemoryEntry[]>>({});
 
 const isUntopiced = computed(() => props.name === "__untopiced__");
 const displayTitle = computed(() =>
@@ -60,6 +61,15 @@ function toggle(memory: Memory) {
   editDescription.value = memory.description;
   editContent.value = memory.content;
   editTopic.value = memory.topic ?? "";
+
+  // Lazy-load related memories via graph
+  if (!relatedMap.value[memory.id]) {
+    tauri.getRelatedMemories(memory.id, 1).then((res) => {
+      relatedMap.value[memory.id] = res.related;
+    }).catch(() => {
+      // Graph may be empty — not an error
+    });
+  }
 }
 
 function switchToEdit() {
@@ -262,6 +272,24 @@ async function confirmDelete(id: string) {
               >
                 {{ saving ? "Saving..." : "Save" }}
               </button>
+            </div>
+          </div>
+
+          <!-- Related memories (graph edges) -->
+          <div v-if="relatedMap[memory.id]?.length" class="related-section">
+            <div class="related-header">Related Memories</div>
+            <div class="related-list">
+              <div
+                v-for="rel in relatedMap[memory.id]"
+                :key="rel.edge.id"
+                class="related-item"
+              >
+                <span class="edge-type-badge" :class="`edge-${rel.edge.edge_type}`">
+                  {{ rel.edge.edge_type }}
+                </span>
+                <span class="related-memory-title">{{ rel.memory.title }}</span>
+                <span class="edge-weight">{{ Math.round(rel.edge.weight * 100) }}%</span>
+              </div>
             </div>
           </div>
 
@@ -644,5 +672,75 @@ async function confirmDelete(id: string) {
 .confirm-text {
   font-size: 0.6875rem;
   color: var(--color-health-warning);
+}
+
+/* Related memories section */
+.related-section {
+  margin-top: 0.875rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--color-border);
+}
+.related-header {
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.5rem;
+}
+.related-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+.related-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 0.5rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 0.25rem;
+  font-size: 0.75rem;
+}
+.edge-type-badge {
+  font-size: 0.5625rem;
+  padding: 0.0625rem 0.375rem;
+  border-radius: 0.5rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--color-text-muted);
+  background: color-mix(in srgb, var(--color-text-muted) 12%, transparent);
+}
+.edge-relates-to {
+  color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
+.edge-depends-on {
+  color: var(--color-health-warning);
+  background: color-mix(in srgb, var(--color-health-warning) 12%, transparent);
+}
+.edge-supersedes {
+  color: var(--color-type-project);
+  background: color-mix(in srgb, var(--color-type-project) 12%, transparent);
+}
+.edge-contradicts {
+  color: var(--color-health-error);
+  background: color-mix(in srgb, var(--color-health-error) 12%, transparent);
+}
+.related-memory-title {
+  flex: 1;
+  min-width: 0;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.edge-weight {
+  font-size: 0.625rem;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 </style>

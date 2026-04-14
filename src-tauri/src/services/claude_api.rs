@@ -7,6 +7,20 @@
 
 use tokio::process::Command;
 
+/// Resolve the full path to the `claude` binary.
+/// macOS GUI apps don't inherit the user's shell PATH, so we
+/// construct the expected path directly without probing the filesystem
+/// (which triggers macOS TCC permission prompts for protected folders).
+fn resolve_claude_binary() -> String {
+    if let Some(home) = dirs::home_dir() {
+        // Standard Claude Code install location
+        let claude_path = home.join(".local/bin/claude");
+        return claude_path.to_string_lossy().to_string();
+    }
+
+    "claude".to_string()
+}
+
 pub struct ClaudeClient {
     binary: String,
     model: Option<String>,
@@ -25,7 +39,7 @@ impl Default for ClaudeClient {
 impl ClaudeClient {
     pub fn new(model: Option<String>) -> Self {
         Self {
-            binary: "claude".to_string(),
+            binary: resolve_claude_binary(),
             model,
         }
     }

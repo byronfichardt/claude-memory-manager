@@ -2,11 +2,15 @@
 import { ref, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { useAppStore } from "@/stores/app";
+import { getVersion } from "@tauri-apps/api/app";
 
 const router = useRouter();
 const app = useAppStore();
 
 const working = ref(false);
+const appVersion = ref("...");
+
+getVersion().then((v) => (appVersion.value = v));
 
 onMounted(() => {
   app.loadStatus();
@@ -292,7 +296,7 @@ function goHome() {
       <h2 class="section-title">About</h2>
       <div class="card muted">
         <div class="label">Claude Memory Manager</div>
-        <div class="sub">v0.1.0 · Memory autopilot for Claude Code</div>
+        <div class="sub">v{{ appVersion }} · Memory autopilot for Claude Code</div>
       </div>
     </section>
 
