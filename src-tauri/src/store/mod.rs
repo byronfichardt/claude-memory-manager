@@ -95,10 +95,23 @@ where
     f(&conn)
 }
 
+/// Flush WAL to disk before the process exits.
+pub fn shutdown() {
+    if let Some(db) = DB.get() {
+        if let Ok(conn) = db.lock() {
+            let _ = conn.pragma_update(None, "wal_checkpoint", "TRUNCATE");
+        }
+    }
+}
+
 fn open_connection() -> Result<Connection, String> {
     let path = db_path();
     let conn = Connection::open(&path)
         .map_err(|e| format!("Failed to open DB at {}: {}", path.display(), e))?;
+
+    // Busy timeout so queries wait instead of failing immediately
+    conn.pragma_update(None, "busy_timeout", "5000")
+        .map_err(|e| format!("busy_timeout: {}", e))?;
 
     // WAL mode for concurrent reads with the MCP server
     conn.pragma_update(None, "journal_mode", "WAL")
@@ -109,6 +122,12 @@ fn open_connection() -> Result<Connection, String> {
         .map_err(|e| format!("foreign_keys: {}", e))?;
 
     run_migrations(&conn)?;
+
+    // Checkpoint WAL to ensure data from previous sessions is flushed to the
+    // main database file. This prevents stale WAL state after a crash or
+    // force-quit from blocking reads on startup.
+    let _ = conn.pragma_update(None, "wal_checkpoint", "TRUNCATE");
+
     Ok(conn)
 }
 

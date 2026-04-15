@@ -41,6 +41,7 @@ async function load() {
 
 onMounted(load);
 watch(() => props.name, load);
+watch(() => app.lastKnownCount, load);
 
 function goBack() {
   router.push({ name: "home" });

@@ -194,6 +194,11 @@ pub fn store_delete_memory(id: String) -> Result<(), String> {
     memories::delete(&id)
 }
 
+#[tauri::command]
+pub fn store_memory_count() -> Result<i64, String> {
+    memories::count()
+}
+
 #[derive(Serialize)]
 pub struct ConfigDirMcpStatus {
     pub label: String,

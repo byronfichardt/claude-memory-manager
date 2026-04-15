@@ -334,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "claude-memory-manager"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "dirs",

@@ -92,45 +92,59 @@ pub fn list_claude_config_dirs() -> Vec<(String, PathBuf)> {
         None => return Vec::new(),
     };
 
+    // Known Claude config directory names. Check these directly instead of
+    // scanning $HOME, which triggers macOS TCC permission prompts for
+    // Documents, Downloads, Desktop, etc.
+    let candidates = [
+        ".claude",
+        ".claude-personal",
+        ".claude-work",
+    ];
+
     let mut results = Vec::new();
 
-    // Walk $HOME looking for .claude* dirs
-    if let Ok(entries) = std::fs::read_dir(&home) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
+    for name in &candidates {
+        let path = home.join(name);
+        if !path.is_dir() {
+            continue;
+        }
+        let looks_like_claude = path.join("projects").is_dir()
+            || path.join(".claude.json").exists();
+        if !looks_like_claude {
+            continue;
+        }
+        let label = if *name == ".claude" {
+            "default".to_string()
+        } else if let Some(suffix) = name.strip_prefix(".claude-") {
+            suffix.to_string()
+        } else if let Some(suffix) = name.strip_prefix(".claude_") {
+            suffix.to_string()
+        } else {
+            name.trim_start_matches('.').to_string()
+        };
+        results.push((label, path));
+    }
+
+    // Also include CLAUDE_CONFIG_DIR if set and not already covered
+    if let Ok(custom) = std::env::var("CLAUDE_CONFIG_DIR") {
+        if !custom.is_empty() {
+            let path = PathBuf::from(&custom);
+            if path.is_dir() && !results.iter().any(|(_, p)| p == &path) {
+                let label = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "custom".to_string());
+                let label = if let Some(suffix) = label.strip_prefix(".claude-") {
+                    suffix.to_string()
+                } else {
+                    label
+                };
+                results.push((label, path));
             }
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !name.starts_with(".claude") {
-                continue;
-            }
-            // Skip non-Claude-Code dirs by requiring the projects/ subdir
-            // OR a .claude.json (Claude Code's main config file)
-            let looks_like_claude = path.join("projects").is_dir()
-                || path.join(".claude.json").exists();
-            if !looks_like_claude {
-                continue;
-            }
-            // Derive a label from the suffix:
-            //   .claude          → "default"
-            //   .claude-personal → "personal"
-            //   .claude-work     → "work"
-            let label = if name == ".claude" {
-                "default".to_string()
-            } else if let Some(suffix) = name.strip_prefix(".claude-") {
-                suffix.to_string()
-            } else if let Some(suffix) = name.strip_prefix(".claude_") {
-                suffix.to_string()
-            } else {
-                name.trim_start_matches('.').to_string()
-            };
-            results.push((label, path));
         }
     }
 
     results.sort_by(|a, b| {
-        // "default" always first
         if a.0 == "default" {
             std::cmp::Ordering::Less
         } else if b.0 == "default" {

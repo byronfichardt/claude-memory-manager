@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from "vue";
+import { onMounted, onUnmounted, ref, watch } from "vue";
 import { useRouter, useRoute } from "vue-router";
 import { useAppStore } from "@/stores/app";
 
@@ -11,6 +11,10 @@ const searchInput = ref("");
 
 onMounted(() => {
   app.initialize();
+});
+
+onUnmounted(() => {
+  app.stopPolling();
 });
 
 watch(

@@ -50,12 +50,20 @@ pub fn run() {
             commands::autopilot::install_hook,
             commands::autopilot::uninstall_hook,
             commands::autopilot::get_related_memories,
+            commands::autopilot::store_memory_count,
         ])
         .setup(|app| {
             // On macOS, set as accessory app so it doesn't appear in the Dock
             #[cfg(target_os = "macos")]
             {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
+
+            // Force-hide the main window on launch. macOS state restoration
+            // can re-show the window after a restart, overriding the
+            // `visible: false` config. This ensures we always start hidden.
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.hide();
             }
 
             // Build a right-click context menu for the tray icon
@@ -91,6 +99,7 @@ pub fn run() {
                             }
                         }
                         "quit" => {
+                            store::shutdown();
                             std::process::exit(0);
                         }
                         _ => {}

@@ -56,6 +56,7 @@ export function useTauri() {
         topic,
       }),
     deleteMemory: (id: string) => invoke<void>("store_delete_memory", { id }),
+    memoryCount: () => invoke<number>("store_memory_count"),
     getRelatedMemories: (id: string, depth?: number) =>
       invoke<RelatedMemoriesResponse>("get_related_memories", { id, depth }),
 
@@ -82,5 +83,6 @@ export function useTauri() {
     getAutoOrganize: () => invoke<boolean>("get_auto_organize"),
     setAutoOrganize: (enabled: boolean) =>
       invoke<void>("set_auto_organize", { enabled }),
+
   };
 }

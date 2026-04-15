@@ -87,6 +87,23 @@ function goHome() {
 
     <h1 class="title">Settings</h1>
 
+    <!-- General -->
+    <section class="section">
+      <h2 class="section-title">General</h2>
+      <div class="card">
+        <div class="row">
+          <div>
+            <div class="label">Launch at login</div>
+            <div class="sub">
+              To start automatically on login, open
+              <strong>System Settings &gt; General &gt; Login Items</strong>
+              and add Claude Memory Manager.
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- Claude Code connection -->
     <section class="section">
       <h2 class="section-title">Claude Code Integration</h2>

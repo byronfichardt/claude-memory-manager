@@ -36,6 +36,10 @@ export const useAppStore = defineStore("app", () => {
   const lastOrganizeReport = ref<OrganizerReport | null>(null);
   const error = ref<string | null>(null);
 
+  // Polling for external changes (e.g. MCP server adding memories)
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  const lastKnownCount = ref(0);
+
   // Computed
   const totalMemories = computed(() => bootstrap.value?.memory_count ?? 0);
   const needsSetup = computed(
@@ -211,15 +215,46 @@ export const useAppStore = defineStore("app", () => {
     }
   }
 
+  async function checkForChanges() {
+    try {
+      const count = await tauri.memoryCount();
+      if (count !== lastKnownCount.value) {
+        lastKnownCount.value = count;
+        // Refresh bootstrap status (updates totalMemories)
+        const b = await tauri.getBootstrapStatus();
+        bootstrap.value = b;
+        // Refresh topics list
+        await loadTopics();
+      }
+    } catch {
+      // Silently ignore polling errors
+    }
+  }
+
+  function startPolling() {
+    stopPolling();
+    pollTimer = setInterval(checkForChanges, 5000);
+  }
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
   async function initialize() {
     await loadStatus();
     await loadAutoOrganize();
     if (!needsSetup.value) {
+      lastKnownCount.value = totalMemories.value;
       await loadTopics();
-      // Auto-run organizer in background if enabled
+      startPolling();
+      // Auto-run organizer in background if enabled.
+      // Use setTimeout so the UI renders topics first before the organizer
+      // grabs the DB lock for a potentially long pass.
       if (autoOrganize.value && totalMemories.value > 0) {
-        // Fire and forget — UI shows "organizing" state
-        runOrganize();
+        setTimeout(() => runOrganize(), 100);
       }
     }
   }
@@ -261,5 +296,7 @@ export const useAppStore = defineStore("app", () => {
     enableHook,
     disableHook,
     initialize,
+    stopPolling,
+    lastKnownCount,
   };
 });
