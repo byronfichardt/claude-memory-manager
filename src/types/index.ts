@@ -8,6 +8,7 @@ export interface Memory {
   memory_type: string | null;
   topic: string | null;
   source: string | null;
+  project: string | null;
   created_at: number;
   updated_at: number;
   access_count: number;
@@ -28,6 +29,7 @@ export interface SearchHit {
   snippet: string;
   topic: string | null;
   memory_type: string | null;
+  project: string | null;
   score: number;
 }
 

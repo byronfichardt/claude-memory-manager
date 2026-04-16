@@ -45,6 +45,24 @@ Rules for good memories:
 - Set `type` appropriately: `user` (about the user), `feedback` (rules/conventions), `project` (project-specific), `reference` (external resource).
 - Skip `topic` — the organizer auto-classifies it later.
 
+### Project scoping — set `project` on `memory_add`
+
+Memories are scoped to a project or kept global. Scope affects retrieval: same-project memories get boosted, other-project memories get demoted, globals are always available. Rules:
+
+- `type=user` → **always global** (system enforces; `project` param is ignored). These describe the human, not any codebase.
+- `type=feedback` / `type=reference` → **default global** unless you pass an explicit `project` path. Most rules and references apply everywhere.
+- `type=project` → **defaults to the current project** (the git root of the directory the MCP server was spawned from). Pass `project: "global"` to override if the fact is actually cross-cutting.
+
+**Single-entry-point workflow**: if the user launched Claude Code from `~/projects/` or another directory that isn't a specific project, but you've been editing files in a specific project during this session, **pass `project: "<git-root-absolute-path>"` explicitly** on `memory_add` and `memory_search`. Otherwise memories won't be scoped correctly. Determine the git root by checking the paths of files you've been reading/editing.
+
+Examples:
+- "Byron prefers terse responses" → `type=user` (auto global)
+- "Never skip pre-commit checks" → `type=feedback` (auto global)
+- "Hearth uses Livewire/Volt" → `type=project`, `project="/Users/byron/projects/personal/hearth"`
+- "Work apps deploy via GitHub Actions" → `type=feedback`, no override (cross-cutting rule, stays global)
+
+Use `project` param on `memory_search` the same way: scope the search to the project you're actually working on so project-specific hits surface.
+
 ### User shortcut
 
 If the user's message starts with `remember:`, `/remember`, or `!remember`, a `<memory-saved>` block will appear in your context — the text has ALREADY been saved automatically. Just acknowledge briefly and proceed with any other part of their message. Do NOT call memory_add in that case.

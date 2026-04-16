@@ -509,6 +509,17 @@ fn apply_merge(merge: &Merge, topic: &str) -> Result<(), String> {
     });
     history::record("merge", snapshot)?;
 
+    // Preserve project scope if all sources share one; otherwise go global
+    // (cross-project merges lose their project affinity rather than get wrongly-scoped).
+    let shared_project: Option<String> = {
+        let first = source_memories[0].project.clone();
+        if source_memories.iter().all(|m| m.project == first) {
+            first
+        } else {
+            None
+        }
+    };
+
     // Insert the merged memory. Ordering: insert first, then delete sources.
     // If this errors halfway, we can still recover from the history log.
     memories::insert(memories::NewMemory {
@@ -518,6 +529,7 @@ fn apply_merge(merge: &Merge, topic: &str) -> Result<(), String> {
         memory_type: source_memories[0].memory_type.clone(),
         topic: Some(topic.to_string()),
         source: Some("auto_merged".to_string()),
+        project: shared_project,
     })?;
 
     // Delete originals
@@ -630,6 +642,7 @@ fn undo_merge(
             .get("memory_type")
             .and_then(|v| v.as_str())
             .map(String::from);
+        let project = orig.get("project").and_then(|v| v.as_str()).map(String::from);
 
         let _ = memories::insert(memories::NewMemory {
             title,
@@ -638,6 +651,7 @@ fn undo_merge(
             memory_type,
             topic,
             source: Some("restored_by_undo".to_string()),
+            project,
         });
     }
 

@@ -13,6 +13,7 @@ pub struct Memory {
     pub memory_type: Option<String>,
     pub topic: Option<String>,
     pub source: Option<String>,
+    pub project: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub access_count: i64,
@@ -26,6 +27,7 @@ pub struct SearchHit {
     pub snippet: String,
     pub topic: Option<String>,
     pub memory_type: Option<String>,
+    pub project: Option<String>,
     pub score: f64,
 }
 
@@ -37,6 +39,7 @@ pub struct NewMemory {
     pub memory_type: Option<String>,
     pub topic: Option<String>,
     pub source: Option<String>,
+    pub project: Option<String>,
 }
 
 fn row_to_memory(row: &Row) -> rusqlite::Result<Memory> {
@@ -48,6 +51,7 @@ fn row_to_memory(row: &Row) -> rusqlite::Result<Memory> {
         memory_type: row.get("memory_type")?,
         topic: row.get("topic")?,
         source: row.get("source")?,
+        project: row.get("project")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         access_count: row.get("access_count")?,
@@ -80,8 +84,8 @@ pub fn insert(new: NewMemory) -> Result<Memory, String> {
 
         conn.execute(
             r#"INSERT INTO memories
-               (id, title, description, content, content_hash, memory_type, topic, source, created_at, updated_at, access_count)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0)"#,
+               (id, title, description, content, content_hash, memory_type, topic, source, project, created_at, updated_at, access_count)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0)"#,
             params![
                 id,
                 new.title,
@@ -91,6 +95,7 @@ pub fn insert(new: NewMemory) -> Result<Memory, String> {
                 new.memory_type,
                 new.topic,
                 new.source,
+                new.project,
                 now,
                 now,
             ],
@@ -158,6 +163,20 @@ pub fn update(
         flag_dependents_for_review(id);
 
         get_by_id(conn, id)?.ok_or_else(|| format!("memory {} not found after update", id))
+    })
+}
+
+/// Update only the project field on an existing memory (used by UI scope editor).
+pub fn update_project(id: &str, project: Option<&str>) -> Result<Memory, String> {
+    with_conn(|conn| {
+        let now = now_ts();
+        conn.execute(
+            "UPDATE memories SET project = ?1, updated_at = ?2 WHERE id = ?3",
+            params![project, now, id],
+        )
+        .map_err(|e| format!("update_project: {}", e))?;
+
+        get_by_id(conn, id)?.ok_or_else(|| format!("memory {} not found after update_project", id))
     })
 }
 
@@ -331,7 +350,7 @@ pub fn search(query: &str, limit: Option<u32>) -> Result<Vec<SearchHit>, String>
 
         let mut stmt = conn
             .prepare(
-                r#"SELECT m.id, m.title, m.description, m.topic, m.memory_type,
+                r#"SELECT m.id, m.title, m.description, m.topic, m.memory_type, m.project,
                           snippet(memories_fts, 2, '[', ']', '...', 32) as snippet,
                           bm25(memories_fts) as score
                    FROM memories_fts
@@ -350,6 +369,7 @@ pub fn search(query: &str, limit: Option<u32>) -> Result<Vec<SearchHit>, String>
                     description: row.get("description")?,
                     topic: row.get("topic")?,
                     memory_type: row.get("memory_type")?,
+                    project: row.get("project")?,
                     snippet: row.get("snippet")?,
                     score: row.get("score")?,
                 })

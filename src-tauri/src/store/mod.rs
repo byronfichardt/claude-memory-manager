@@ -158,7 +158,23 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
             .map_err(|e| format!("bump v2: {}", e))?;
     }
 
+    if version < 3 {
+        apply_migration_v3(conn)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (3)", [])
+            .map_err(|e| format!("bump v3: {}", e))?;
+    }
+
     Ok(())
+}
+
+fn apply_migration_v3(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        ALTER TABLE memories ADD COLUMN project TEXT;
+        CREATE INDEX idx_memories_project ON memories(project);
+        "#,
+    )
+    .map_err(|e| format!("migration v3: {}", e))
 }
 
 fn apply_migration_v2(conn: &Connection) -> Result<(), String> {

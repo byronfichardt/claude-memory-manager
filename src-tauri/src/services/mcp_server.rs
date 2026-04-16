@@ -8,12 +8,24 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
+use crate::services::project;
 use crate::store::{edges, memories};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "claude-memory-manager";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Resolved at MCP server startup — the git root of whatever directory Claude Code
+/// spawned the server from, if any. Used as a fallback "current project" when
+/// Claude doesn't pass an explicit `project` param.
+static SERVER_PROJECT: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+fn server_project() -> Option<&'static Path> {
+    SERVER_PROJECT.get().and_then(|o| o.as_deref())
+}
 
 #[derive(Deserialize)]
 struct JsonRpcRequest {
@@ -43,6 +55,13 @@ struct JsonRpcError {
 
 /// Run the stdio MCP server. Blocks until stdin is closed.
 pub fn run() -> io::Result<()> {
+    // Capture the project the MCP server was spawned from. Used as a fallback
+    // "current project" in tool calls when Claude doesn't pass one explicitly.
+    let startup_project = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| project::resolve_project(&cwd));
+    let _ = SERVER_PROJECT.set(startup_project);
+
     // Initialize the store lazily — fast with WAL SQLite
     if let Err(e) = crate::store::init() {
         eprintln!("[mcp] failed to init store: {}", e);
@@ -159,6 +178,10 @@ fn handle_tools_list() -> Value {
                             "type": "integer",
                             "description": "Maximum number of results to return (default 10, max 50)",
                             "default": 10
+                        },
+                        "project": {
+                            "type": "string",
+                            "description": "Optional: absolute git-root path of the project you're working on, or \"global\" for a cross-project search. Boosts same-project memories and slightly demotes others. If omitted, uses the directory the MCP server was spawned from."
                         }
                     },
                     "required": ["query"]
@@ -166,7 +189,7 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "memory_add",
-                "description": "Save a new memory to the store. You MUST call this proactively — don't wait for the user to ask. Save user corrections, project conventions, debugging findings, stated preferences, architecture decisions, workflow discoveries, and project state changes. A typical session should produce 3-10 memories. Be specific and include enough context that the memory is useful in future sessions.",
+                "description": "Save a new memory to the store. You MUST call this proactively — don't wait for the user to ask. Save user corrections, project conventions, debugging findings, stated preferences, architecture decisions, workflow discoveries, and project state changes. A typical session should produce 3-10 memories. Be specific and include enough context that the memory is useful in future sessions.\n\nPROJECT SCOPING: If the memory is a user preference or cross-project rule (type=user/feedback/reference), leave `project` unset — it will be saved as global. If it's a specific fact about the current codebase (type=project), set `project` to the absolute git-root path of that project. Type=user is ALWAYS saved as global regardless.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -190,6 +213,10 @@ fn handle_tools_list() -> Value {
                         "topic": {
                             "type": "string",
                             "description": "Optional topic for grouping (e.g. 'deployment', 'testing'). If omitted, will be auto-classified."
+                        },
+                        "project": {
+                            "type": "string",
+                            "description": "Optional scope override. \"global\" forces a global memory. An absolute git-root path scopes it to that project (e.g. /Users/byron/projects/personal/hearth). If omitted: type=user is always global; type=feedback/reference default global; type=project defaults to the git root of the directory the MCP server was spawned from."
                         }
                     },
                     "required": ["title", "content"]
@@ -284,18 +311,58 @@ fn tool_memory_search(args: Value) -> Result<String, String> {
         .and_then(Value::as_str)
         .ok_or("query required")?;
     let limit = args.get("limit").and_then(Value::as_u64).map(|n| n as u32);
+    let explicit_project = args.get("project").and_then(Value::as_str);
 
-    let hits = memories::search(query, limit)?;
+    // Resolve current project: explicit > server startup > None.
+    // `current_project` owns a PathBuf when explicit, else borrows from the
+    // static server project. Using PathBuf throughout avoids lifetime issues.
+    let current_project: Option<PathBuf> = match explicit_project {
+        Some(p) if p.trim().eq_ignore_ascii_case("global") => None,
+        Some(p) if !p.trim().is_empty() => Some(PathBuf::from(p.trim())),
+        _ => server_project().map(|p| p.to_path_buf()),
+    };
+    let current_project_ref: Option<&Path> = current_project.as_deref();
+
+    // Over-fetch so affinity re-ranking can bubble project-local memories up.
+    let fetch_limit = limit.map(|n| n.saturating_mul(2).min(50));
+    let mut hits = memories::search(query, fetch_limit)?;
     if hits.is_empty() {
         return Ok(format!("No memories found for query: {}", query));
     }
 
+    // Re-rank by combined (BM25-proxy + affinity). BM25 in FTS5 is negative
+    // with lower=better — normalize to a simple rank-based score.
+    let n = hits.len() as f64;
+    let mut indexed: Vec<(usize, f64)> = hits
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let bm25_rank_norm = 1.0 - (i as f64 / n.max(1.0)); // top hit = 1.0, bottom ~ 0
+            let aff = project_affinity(h.project.as_deref(), current_project_ref);
+            (i, bm25_rank_norm + aff)
+        })
+        .collect();
+    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let final_limit = limit.unwrap_or(10) as usize;
+    let reranked: Vec<memories::SearchHit> = indexed
+        .into_iter()
+        .take(final_limit)
+        .map(|(idx, _)| hits[idx].clone())
+        .collect();
+    hits = reranked;
+
     let mut out = format!("Found {} memories for \"{}\":\n\n", hits.len(), query);
     for (i, hit) in hits.iter().enumerate() {
+        let scope = match hit.project.as_deref() {
+            None => "global".to_string(),
+            Some(p) => format!("project: {}", short_project(p)),
+        };
         out.push_str(&format!(
-            "{}. [{}] {}\n   id: {}\n   {}\n   {}\n\n",
+            "{}. [{}] ({}) {}\n   id: {}\n   {}\n   {}\n\n",
             i + 1,
             hit.topic.as_deref().unwrap_or("untopiced"),
+            scope,
             hit.title,
             hit.id,
             hit.description,
@@ -303,6 +370,36 @@ fn tool_memory_search(args: Value) -> Result<String, String> {
         ));
     }
     Ok(out)
+}
+
+/// Derive a short display label from a project path (basename).
+fn short_project(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string())
+}
+
+// Project affinity scoring — kept in sync with hook.rs values.
+const MCP_PROJECT_AFFINITY_EXACT: f64 = 0.40;
+const MCP_PROJECT_AFFINITY_SHARED_PARENT: f64 = 0.15;
+const MCP_PROJECT_AFFINITY_UNRELATED: f64 = -0.20;
+
+fn project_affinity(memory_project: Option<&str>, current: Option<&Path>) -> f64 {
+    match (memory_project, current) {
+        (_, None) => 0.0,
+        (None, Some(_)) => 0.0,
+        (Some(mp), Some(cp)) => {
+            let mp_path = Path::new(mp);
+            if mp_path == cp {
+                MCP_PROJECT_AFFINITY_EXACT
+            } else if project::shared_parent(mp_path, cp) {
+                MCP_PROJECT_AFFINITY_SHARED_PARENT
+            } else {
+                MCP_PROJECT_AFFINITY_UNRELATED
+            }
+        }
+    }
 }
 
 fn tool_memory_add(args: Value) -> Result<String, String> {
@@ -329,6 +426,17 @@ fn tool_memory_add(args: Value) -> Result<String, String> {
         .get("topic")
         .and_then(Value::as_str)
         .map(str::to_string);
+    let explicit_project = args
+        .get("project")
+        .and_then(Value::as_str);
+
+    // Resolve scope: user type is forced global; explicit override wins;
+    // otherwise type-driven default with server's startup project as the source.
+    let project = project::resolve_memory_scope(
+        memory_type.as_deref(),
+        explicit_project,
+        server_project(),
+    );
 
     let memory = memories::insert(memories::NewMemory {
         title,
@@ -337,11 +445,17 @@ fn tool_memory_add(args: Value) -> Result<String, String> {
         memory_type,
         topic,
         source: Some("claude_session".to_string()),
+        project: project.clone(),
     })?;
 
+    let scope_label = match project.as_deref() {
+        None => "global".to_string(),
+        Some(p) => format!("project: {}", p),
+    };
+
     Ok(format!(
-        "Memory saved.\nid: {}\ntitle: {}",
-        memory.id, memory.title
+        "Memory saved ({}).\nid: {}\ntitle: {}",
+        scope_label, memory.id, memory.title
     ))
 }
 

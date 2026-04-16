@@ -5,4 +5,5 @@ pub mod hook;
 pub mod ingestion;
 pub mod mcp_server;
 pub mod organizer;
+pub mod project;
 pub mod scanner;

@@ -175,6 +175,7 @@ pub fn store_add_memory(
         memory_type,
         topic,
         source: Some("manual".to_string()),
+        project: None,
     })
 }
 

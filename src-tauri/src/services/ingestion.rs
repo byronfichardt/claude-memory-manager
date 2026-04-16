@@ -52,6 +52,7 @@ pub fn ingest_existing_files() -> Result<IngestionReport, String> {
                         memory_type,
                         topic: None, // organizer assigns later
                         source: Some(format!("{}: {}", source_label, file.relative_path)),
+                        project: None, // imported memories stay global; user classifies later
                     };
 
                     match memories::insert(new) {
