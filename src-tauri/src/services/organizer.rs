@@ -3,9 +3,34 @@
 //! Uses `claude -p` under the hood.
 
 use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter};
 
 use crate::services::claude_api::ClaudeClient;
 use crate::store::{edges, history, memories, settings, topics};
+
+pub const PROGRESS_EVENT: &str = "organizer:progress";
+
+#[derive(Serialize, Clone)]
+pub struct OrganizerProgress {
+    pub phase: &'static str,
+    pub message: String,
+    pub current: usize,
+    pub total: usize,
+}
+
+fn emit(handle: Option<&AppHandle>, phase: &'static str, message: impl Into<String>, current: usize, total: usize) {
+    if let Some(h) = handle {
+        let _ = h.emit(
+            PROGRESS_EVENT,
+            OrganizerProgress {
+                phase,
+                message: message.into(),
+                current,
+                total,
+            },
+        );
+    }
+}
 
 const SETTING_LAST_ORGANIZE_TS: &str = "last_organize_ts";
 const SETTING_INITIAL_RELATE_DONE: &str = "initial_relate_done";
@@ -152,7 +177,8 @@ struct Merge {
 /// then consolidate overlapping topics.
 ///
 /// Only dedup/consolidate run on topics that changed since the last pass.
-pub async fn run_full_pass() -> Result<OrganizerReport, String> {
+pub async fn run_full_pass(handle: Option<AppHandle>) -> Result<OrganizerReport, String> {
+    let h = handle.as_ref();
     let mut report = OrganizerReport::default();
     let client = ClaudeClient::new(None);
 
@@ -162,48 +188,50 @@ pub async fn run_full_pass() -> Result<OrganizerReport, String> {
         .unwrap_or(0);
     let now_ts = chrono::Utc::now().timestamp();
 
+    emit(h, "starting", "Preparing organizer", 0, 0);
+
     // Phase 1: classify untopiced memories
-    match classify_untopiced(&client, &mut report).await {
+    match classify_untopiced(h, &client, &mut report).await {
         Ok(()) => {}
         Err(e) => report.errors.push(format!("classify: {}", e)),
     }
 
     // Phase 1.5: discover relationships.
-    // First run: relate ALL topics to seed the graph (one-time).
-    // Subsequent runs: only relate topics that got new classifications this pass.
     let initial_relate_done = settings::get_bool(SETTING_INITIAL_RELATE_DONE, false)
         .unwrap_or(false);
 
     if !initial_relate_done {
-        match relate_all_topics(&client, &mut report).await {
+        match relate_all_topics(h, &client, &mut report).await {
             Ok(()) => {
                 let _ = settings::set_bool(SETTING_INITIAL_RELATE_DONE, true);
             }
             Err(e) => report.errors.push(format!("relate (initial): {}", e)),
         }
     } else if report.classified_count > 0 {
-        match relate_newly_classified_topics(&client, &mut report).await {
+        match relate_newly_classified_topics(h, &client, &mut report).await {
             Ok(()) => {}
             Err(e) => report.errors.push(format!("relate: {}", e)),
         }
     }
 
     // Phase 2: dedup only topics with new/updated memories since last pass
-    match dedup_changed_topics(&client, &mut report, last_ts).await {
+    match dedup_changed_topics(h, &client, &mut report, last_ts).await {
         Ok(()) => {}
         Err(e) => report.errors.push(format!("dedup: {}", e)),
     }
 
     // Phase 3: consolidate only if new classifications happened
     if report.classified_count > 0 || !report.new_topics_created.is_empty() {
+        emit(h, "consolidate", "Consolidating overlapping topics", 0, 1);
         match consolidate_topics(&client, &mut report).await {
             Ok(()) => {}
             Err(e) => report.errors.push(format!("consolidate: {}", e)),
         }
     }
 
-    // Record the timestamp for next pass
     let _ = settings::set(SETTING_LAST_ORGANIZE_TS, &now_ts.to_string());
+
+    emit(h, "done", "Organize complete", 0, 0);
 
     Ok(report)
 }
@@ -339,6 +367,7 @@ fn apply_topic_merge(merge: &TopicMerge) -> Result<usize, String> {
 
 /// Classify all untopiced memories in batches.
 pub async fn classify_untopiced(
+    handle: Option<&AppHandle>,
     client: &ClaudeClient,
     report: &mut OrganizerReport,
 ) -> Result<(), String> {
@@ -350,8 +379,15 @@ pub async fn classify_untopiced(
     let existing_topics: Vec<String> =
         topics::list_all()?.into_iter().map(|t| t.name).collect();
 
-    // Process in batches
-    for chunk in untopiced.chunks(CLASSIFY_BATCH_SIZE) {
+    let total_batches = untopiced.chunks(CLASSIFY_BATCH_SIZE).count();
+    for (i, chunk) in untopiced.chunks(CLASSIFY_BATCH_SIZE).enumerate() {
+        emit(
+            handle,
+            "classify",
+            format!("Classifying {} memories", chunk.len()),
+            i,
+            total_batches,
+        );
         match classify_batch(client, chunk, &existing_topics).await {
             Ok(assignments) => {
                 apply_classifications(&assignments, &existing_topics, report)?;
@@ -431,6 +467,7 @@ fn apply_classifications(
 
 /// Dedup only topics that have memories created/updated since `since_ts`.
 async fn dedup_changed_topics(
+    handle: Option<&AppHandle>,
     client: &ClaudeClient,
     report: &mut OrganizerReport,
     since_ts: i64,
@@ -440,12 +477,20 @@ async fn dedup_changed_topics(
         return Ok(());
     }
 
-    for topic_name in changed_topics {
+    let total = changed_topics.len();
+    for (i, topic_name) in changed_topics.into_iter().enumerate() {
         let mems = memories::list_by_topic(&topic_name)?;
         if mems.len() < DEDUP_MIN_TOPIC_SIZE {
             continue;
         }
 
+        emit(
+            handle,
+            "dedup",
+            format!("Deduping topic '{}'", topic_name),
+            i,
+            total,
+        );
         match dedup_batch(client, &mems).await {
             Ok(merges) => {
                 for merge in merges {
@@ -690,17 +735,26 @@ fn undo_relate(snapshot: &serde_json::Value) -> Result<(), String> {
 
 /// Initial full relate pass — runs once to seed the graph across all topics.
 async fn relate_all_topics(
+    handle: Option<&AppHandle>,
     client: &ClaudeClient,
     report: &mut OrganizerReport,
 ) -> Result<(), String> {
     let all_topics = topics::list_all()?;
 
-    for topic in &all_topics {
+    let total = all_topics.len();
+    for (i, topic) in all_topics.iter().enumerate() {
         let mems = memories::list_by_topic(&topic.name)?;
         if mems.len() < 2 {
             continue;
         }
 
+        emit(
+            handle,
+            "relate",
+            format!("Relating memories in '{}'", topic.name),
+            i,
+            total,
+        );
         for chunk in mems.chunks(RELATE_BATCH_SIZE) {
             match relate_batch(client, chunk).await {
                 Ok(ai_edges) => {
@@ -720,6 +774,7 @@ async fn relate_all_topics(
 /// new classifications this pass. Only processes topics from the report's
 /// new_topics_created list plus any existing topics that got new members.
 async fn relate_newly_classified_topics(
+    handle: Option<&AppHandle>,
     client: &ClaudeClient,
     report: &mut OrganizerReport,
 ) -> Result<(), String> {
@@ -737,12 +792,20 @@ async fn relate_newly_classified_topics(
         }
     }
 
-    for topic_name in &topics_to_relate {
+    let total = topics_to_relate.len();
+    for (i, topic_name) in topics_to_relate.iter().enumerate() {
         let mems = memories::list_by_topic(topic_name)?;
         if mems.len() < 2 {
             continue;
         }
 
+        emit(
+            handle,
+            "relate",
+            format!("Relating memories in '{}'", topic_name),
+            i,
+            total,
+        );
         // Process in batches
         for chunk in mems.chunks(RELATE_BATCH_SIZE) {
             match relate_batch(client, chunk).await {

@@ -222,7 +222,25 @@ Everything outside those markers/keys is left untouched.
 
 ## Uninstall
 
-The app has no automatic uninstaller yet. To fully remove:
+macOS doesn't run any code when you drag an app to the Trash, so Claude Memory Manager can't clean up automatically. Use the in-app button before removing the app bundle.
+
+### Recommended: in-app "Uninstall cleanly"
+
+1. Open the dashboard → **Settings** → scroll to **Danger zone**.
+2. Click **Uninstall...**, then **Yes, delete everything** to confirm.
+3. The app:
+   - Removes the `UserPromptSubmit` hook from every `~/.claude*/settings.json`
+   - Removes the `mcp__claude-memory-manager` permission entry
+   - Runs `claude mcp remove claude-memory-manager --scope user` per config dir
+   - Strips the managed section from every `~/.claude*/CLAUDE.md`
+   - Deletes `~/.claude-memory-manager/`
+4. Quit the app and drag `Claude Memory Manager.app` to the Trash.
+
+> The uninstall is destructive — your memory database is deleted. Back it up first (`cp -a ~/.claude-memory-manager ~/.claude-memory-manager.backup`) if you might want to restore later.
+
+### Manual fallback
+
+If you've already dragged the app to the Trash and want to clean up the orphans:
 
 ```bash
 # 1. Unregister MCP server (one per Claude config dir)

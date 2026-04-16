@@ -1,5 +1,18 @@
 export type MemoryKind = "user" | "feedback" | "project" | "reference";
 
+export interface OrganizerProgress {
+  phase:
+    | "starting"
+    | "classify"
+    | "relate"
+    | "dedup"
+    | "consolidate"
+    | "done";
+  message: string;
+  current: number;
+  total: number;
+}
+
 export interface Memory {
   id: string;
   title: string;
@@ -45,11 +58,17 @@ export interface BootstrapStatus {
   config_dirs: ConfigDirStatus[];
   memory_count: number;
   ingestion_done: boolean;
+  claude_code_installed: boolean;
+  claude_cli_available: boolean;
+  startup_errors: string[];
   // back-compat fields
   claude_md_exists: boolean;
   claude_md_path: string;
   managed_section_present: boolean;
 }
+
+export const ERR_NO_CLAUDE_INSTALL = "NO_CLAUDE_INSTALL";
+export const ERR_NO_CLAUDE_CLI = "NO_CLAUDE_CLI";
 
 export interface IngestionReport {
   files_scanned: number;
@@ -128,4 +147,33 @@ export interface HistoryEntry {
   action: string;
   timestamp: number;
   snapshot: string;
+}
+
+export interface UninstallStep {
+  label: string;
+  success: boolean;
+  error: string | null;
+}
+
+export interface UninstallReport {
+  steps: UninstallStep[];
+  data_dir_removed: boolean;
+  data_dir_path: string;
+}
+
+export interface ExportSummary {
+  path: string;
+  memory_count: number;
+  bytes_written: number;
+}
+
+export type ImportMode = "merge" | "replace";
+
+export interface ImportReport {
+  memories_added: number;
+  memories_skipped: number;
+  topics_added: number;
+  edges_added: number;
+  edges_skipped: number;
+  errors: string[];
 }

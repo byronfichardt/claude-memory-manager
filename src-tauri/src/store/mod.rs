@@ -7,9 +7,70 @@ pub mod topics;
 #[cfg(test)]
 mod smoke_test;
 
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{OnceLock, RwLock};
+
+/// Captured startup errors (directory creation, DB init) that the UI can
+/// surface. Populated by `db_path` / `data_dir` / `init`.
+static STARTUP_ERRORS: OnceLock<RwLock<Vec<String>>> = OnceLock::new();
+
+fn startup_errors() -> &'static RwLock<Vec<String>> {
+    STARTUP_ERRORS.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+pub fn record_startup_error(msg: impl Into<String>) {
+    let msg = msg.into();
+    eprintln!("[claude-memory-manager startup] {}", msg);
+    if let Ok(mut errs) = startup_errors().write() {
+        errs.push(msg.clone());
+    }
+    append_startup_log(&msg);
+}
+
+pub fn get_startup_errors() -> Vec<String> {
+    startup_errors()
+        .read()
+        .map(|errs| errs.clone())
+        .unwrap_or_default()
+}
+
+/// Append a line to `<data_dir>/startup.log`. Best-effort: if we can't reach
+/// the data dir (the very thing that may have failed), fall back to the home
+/// directory, then silently give up. Never panics.
+fn append_startup_log(msg: &str) {
+    use std::io::Write;
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!("{} {}\n", ts, msg);
+
+    // Try the resolved data dir first (without triggering recursive error recording)
+    let data_dir_candidate = resolve_data_dir_raw();
+    let candidates: [Option<PathBuf>; 2] = [
+        data_dir_candidate.map(|d| d.join("startup.log")),
+        dirs::home_dir().map(|h| h.join(".claude-memory-manager-startup.log")),
+    ];
+
+    for candidate in candidates.into_iter().flatten() {
+        if let Some(parent) = candidate.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&candidate)
+        {
+            if f.write_all(line.as_bytes()).is_ok() {
+                return;
+            }
+        }
+    }
+}
 
 /// Path to the SQLite database file.
 ///
@@ -20,8 +81,7 @@ use std::sync::{Mutex, OnceLock};
 ///
 /// The DB will be migrated from older locations if found.
 pub fn db_path() -> PathBuf {
-    let data_dir = resolve_data_dir();
-    std::fs::create_dir_all(&data_dir).ok();
+    let data_dir = ensure_data_dir();
 
     let new_db = data_dir.join("memories.db");
     if !new_db.exists() {
@@ -31,17 +91,42 @@ pub fn db_path() -> PathBuf {
     new_db
 }
 
+/// Data directory holding `memories.db` and sidecar state files
+/// (e.g. `active-project.json`). Created if missing.
+pub fn data_dir() -> PathBuf {
+    ensure_data_dir()
+}
+
+fn ensure_data_dir() -> PathBuf {
+    let dir = resolve_data_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        record_startup_error(format!("Failed to create data dir {}: {}", dir.display(), e));
+    }
+    dir
+}
+
 fn resolve_data_dir() -> PathBuf {
+    resolve_data_dir_raw().unwrap_or_else(|| {
+        record_startup_error(
+            "No home directory available; falling back to current working directory",
+        );
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(".claude-memory-manager")
+    })
+}
+
+/// Same as resolve_data_dir, but returns None instead of recording an error.
+/// Used internally by the error-recording machinery to avoid recursion.
+fn resolve_data_dir_raw() -> Option<PathBuf> {
     // Escape hatch for endpoint-protection tools like WithSecure XFENCE
     if let Ok(custom) = std::env::var("CLAUDE_MEMORY_DB_DIR") {
         if !custom.is_empty() {
-            return PathBuf::from(custom);
+            return Some(PathBuf::from(custom));
         }
     }
 
-    dirs::home_dir()
-        .expect("no home dir available")
-        .join(".claude-memory-manager")
+    dirs::home_dir().map(|h| h.join(".claude-memory-manager"))
 }
 
 fn migrate_from_old_locations(new_dir: &std::path::Path) {
@@ -75,14 +160,25 @@ fn migrate_from_old_locations(new_dir: &std::path::Path) {
     }
 }
 
-/// Global connection, protected by Mutex for thread safety.
-/// SQLite in WAL mode allows concurrent readers; we serialize writes.
-static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
+/// Connection pool. WAL mode allows concurrent readers when each caller
+/// holds its own connection — a single Mutex<Connection> serializes
+/// everything (including reads), which stalls the UI when the organizer
+/// is writing.
+static POOL: OnceLock<Pool<SqliteConnectionManager>> = OnceLock::new();
 
 pub fn init() -> Result<(), String> {
-    let conn = open_connection()?;
-    DB.set(Mutex::new(conn))
-        .map_err(|_| "DB already initialized".to_string())?;
+    let pool = build_pool().map_err(|e| {
+        record_startup_error(format!("DB init failed: {}", e));
+        e
+    })?;
+
+    // Run migrations and an initial WAL checkpoint on a fresh connection.
+    let conn = pool.get().map_err(|e| format!("DB pool acquire: {}", e))?;
+    run_migrations(&conn)?;
+    let _ = conn.pragma_update(None, "wal_checkpoint", "TRUNCATE");
+    drop(conn);
+
+    POOL.set(pool).map_err(|_| "DB already initialized".to_string())?;
     Ok(())
 }
 
@@ -90,45 +186,62 @@ pub fn with_conn<F, R>(f: F) -> Result<R, String>
 where
     F: FnOnce(&Connection) -> Result<R, String>,
 {
-    let db = DB.get().ok_or_else(|| "DB not initialized".to_string())?;
-    let conn = db.lock().map_err(|e| format!("DB lock poisoned: {}", e))?;
+    let pool = POOL.get().ok_or_else(|| "DB not initialized".to_string())?;
+    let conn = pool.get().map_err(|e| format!("DB pool acquire: {}", e))?;
     f(&conn)
 }
 
-/// Flush WAL to disk before the process exits.
-pub fn shutdown() {
-    if let Some(db) = DB.get() {
-        if let Ok(conn) = db.lock() {
-            let _ = conn.pragma_update(None, "wal_checkpoint", "TRUNCATE");
-        }
-    }
-}
-
-fn open_connection() -> Result<Connection, String> {
+/// Open a single raw SQLite connection for the UserPromptSubmit hook.
+///
+/// The hook is a fresh OS process per prompt: spinning up an r2d2 pool and
+/// running `wal_checkpoint TRUNCATE` on the hot path is pure waste. This
+/// opens one connection, sets the minimal pragmas, and runs migrations
+/// lazily. No pool, no startup checkpoint.
+pub fn open_hook_connection() -> Result<Connection, String> {
     let path = db_path();
     let conn = Connection::open(&path)
-        .map_err(|e| format!("Failed to open DB at {}: {}", path.display(), e))?;
-
-    // Busy timeout so queries wait instead of failing immediately
+        .map_err(|e| format!("open hook DB at {}: {}", path.display(), e))?;
     conn.pragma_update(None, "busy_timeout", "5000")
         .map_err(|e| format!("busy_timeout: {}", e))?;
-
-    // WAL mode for concurrent reads with the MCP server
     conn.pragma_update(None, "journal_mode", "WAL")
-        .map_err(|e| format!("WAL mode: {}", e))?;
+        .map_err(|e| format!("journal_mode: {}", e))?;
     conn.pragma_update(None, "synchronous", "NORMAL")
         .map_err(|e| format!("synchronous: {}", e))?;
     conn.pragma_update(None, "foreign_keys", "ON")
         .map_err(|e| format!("foreign_keys: {}", e))?;
 
+    // Run migrations idempotently — short-circuits fast via the schema_version
+    // check when already current. Covers the edge case of a hook invocation
+    // against a DB that was created by an older build and never touched by a
+    // newer GUI/MCP process yet.
     run_migrations(&conn)?;
 
-    // Checkpoint WAL to ensure data from previous sessions is flushed to the
-    // main database file. This prevents stale WAL state after a crash or
-    // force-quit from blocking reads on startup.
-    let _ = conn.pragma_update(None, "wal_checkpoint", "TRUNCATE");
-
     Ok(conn)
+}
+
+/// Flush WAL to disk before the process exits.
+pub fn shutdown() {
+    if let Some(pool) = POOL.get() {
+        if let Ok(conn) = pool.get() {
+            let _ = conn.pragma_update(None, "wal_checkpoint", "TRUNCATE");
+        }
+    }
+}
+
+fn build_pool() -> Result<Pool<SqliteConnectionManager>, String> {
+    let path = db_path();
+    let manager = SqliteConnectionManager::file(&path).with_init(|c| {
+        c.pragma_update(None, "busy_timeout", "5000")?;
+        c.pragma_update(None, "journal_mode", "WAL")?;
+        c.pragma_update(None, "synchronous", "NORMAL")?;
+        c.pragma_update(None, "foreign_keys", "ON")?;
+        Ok(())
+    });
+
+    Pool::builder()
+        .max_size(8)
+        .build(manager)
+        .map_err(|e| format!("Failed to build DB pool at {}: {}", path.display(), e))
 }
 
 fn run_migrations(conn: &Connection) -> Result<(), String> {
@@ -164,6 +277,12 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
             .map_err(|e| format!("bump v3: {}", e))?;
     }
 
+    if version < 4 {
+        apply_migration_v4(conn)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (4)", [])
+            .map_err(|e| format!("bump v4: {}", e))?;
+    }
+
     Ok(())
 }
 
@@ -175,6 +294,27 @@ fn apply_migration_v3(conn: &Connection) -> Result<(), String> {
         "#,
     )
     .map_err(|e| format!("migration v3: {}", e))
+}
+
+// Rebuild the AFTER UPDATE trigger with a WHEN clause so access_count bumps
+// (issued by the hook on every prompt) don't re-index FTS rows.
+fn apply_migration_v4(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        DROP TRIGGER IF EXISTS memories_au;
+        CREATE TRIGGER memories_au AFTER UPDATE ON memories
+        WHEN new.title IS NOT old.title
+          OR new.description IS NOT old.description
+          OR new.content IS NOT old.content
+        BEGIN
+            INSERT INTO memories_fts(memories_fts, rowid, title, description, content)
+            VALUES ('delete', old.rowid, old.title, old.description, old.content);
+            INSERT INTO memories_fts(rowid, title, description, content)
+            VALUES (new.rowid, new.title, new.description, new.content);
+        END;
+        "#,
+    )
+    .map_err(|e| format!("migration v4: {}", e))
 }
 
 fn apply_migration_v2(conn: &Connection) -> Result<(), String> {

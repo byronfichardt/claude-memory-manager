@@ -71,39 +71,42 @@ fn now_ts() -> i64 {
 /// Insert a new memory. Returns the created memory.
 /// If an existing memory has the same content hash, returns the existing one (idempotent).
 pub fn insert(new: NewMemory) -> Result<Memory, String> {
-    with_conn(|conn| {
-        let hash = content_hash(&new.content);
+    with_conn(|conn| insert_with_conn(conn, new))
+}
 
-        // Check for existing identical content
-        if let Some(existing) = find_by_hash(conn, &hash)? {
-            return Ok(existing);
-        }
+/// Connection-owning variant of `insert` — used by the hook, which runs a raw
+/// SQLite connection rather than checking out from the r2d2 pool.
+pub fn insert_with_conn(conn: &Connection, new: NewMemory) -> Result<Memory, String> {
+    let hash = content_hash(&new.content);
 
-        let id = uuid::Uuid::new_v4().to_string();
-        let now = now_ts();
+    if let Some(existing) = find_by_hash(conn, &hash)? {
+        return Ok(existing);
+    }
 
-        conn.execute(
-            r#"INSERT INTO memories
-               (id, title, description, content, content_hash, memory_type, topic, source, project, created_at, updated_at, access_count)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0)"#,
-            params![
-                id,
-                new.title,
-                new.description,
-                new.content,
-                hash,
-                new.memory_type,
-                new.topic,
-                new.source,
-                new.project,
-                now,
-                now,
-            ],
-        )
-        .map_err(|e| format!("insert: {}", e))?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = now_ts();
 
-        get_by_id(conn, &id)?.ok_or_else(|| "insert succeeded but row missing".to_string())
-    })
+    conn.execute(
+        r#"INSERT INTO memories
+           (id, title, description, content, content_hash, memory_type, topic, source, project, created_at, updated_at, access_count)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0)"#,
+        params![
+            id,
+            new.title,
+            new.description,
+            new.content,
+            hash,
+            new.memory_type,
+            new.topic,
+            new.source,
+            new.project,
+            now,
+            now,
+        ],
+    )
+    .map_err(|e| format!("insert: {}", e))?;
+
+    get_by_id(conn, &id)?.ok_or_else(|| "insert succeeded but row missing".to_string())
 }
 
 fn find_by_hash(conn: &Connection, hash: &str) -> Result<Option<Memory>, String> {
@@ -300,35 +303,33 @@ fn flag_dependents_for_review(memory_id: &str) {
 /// Fetch multiple memories by ID in a single query.
 /// Used by the hook for batch-fetching graph neighbors.
 pub fn get_by_ids(ids: &[&str]) -> Result<Vec<Memory>, String> {
+    with_conn(|conn| get_by_ids_with_conn(conn, ids))
+}
+
+pub fn get_by_ids_with_conn(conn: &Connection, ids: &[&str]) -> Result<Vec<Memory>, String> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
 
-    with_conn(|conn| {
-        let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{}", i)).collect();
-        let sql = format!(
-            "SELECT * FROM memories WHERE id IN ({})",
-            placeholders.join(", ")
-        );
+    let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{}", i)).collect();
+    let sql = format!(
+        "SELECT * FROM memories WHERE id IN ({})",
+        placeholders.join(", ")
+    );
 
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| format!("prepare get_by_ids: {}", e))?;
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare get_by_ids: {}", e))?;
 
-        let param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
-            ids.iter().map(|id| Box::new(id.to_string()) as Box<dyn rusqlite::types::ToSql>).collect();
-        let refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|b| b.as_ref()).collect();
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(ids.iter().copied()), row_to_memory)
+        .map_err(|e| format!("query get_by_ids: {}", e))?;
 
-        let rows = stmt
-            .query_map(refs.as_slice(), row_to_memory)
-            .map_err(|e| format!("query get_by_ids: {}", e))?;
-
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r.map_err(|e| e.to_string())?);
-        }
-        Ok(out)
-    })
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
 }
 
 pub fn count() -> Result<i64, String> {
@@ -341,56 +342,74 @@ pub fn count() -> Result<i64, String> {
 /// Full-text search returning snippets. Used by both the UI and the MCP server.
 /// `limit` defaults to 10 if None.
 pub fn search(query: &str, limit: Option<u32>) -> Result<Vec<SearchHit>, String> {
-    with_conn(|conn| {
-        let limit = limit.unwrap_or(10).min(50);
-        let sanitized = sanitize_fts_query(query);
-        if sanitized.is_empty() {
-            return Ok(Vec::new());
-        }
+    with_conn(|conn| search_with_conn(conn, query, limit))
+}
 
-        let mut stmt = conn
-            .prepare(
-                r#"SELECT m.id, m.title, m.description, m.topic, m.memory_type, m.project,
-                          snippet(memories_fts, 2, '[', ']', '...', 32) as snippet,
-                          bm25(memories_fts) as score
-                   FROM memories_fts
-                   JOIN memories m ON m.rowid = memories_fts.rowid
-                   WHERE memories_fts MATCH ?1
-                   ORDER BY score
-                   LIMIT ?2"#,
-            )
-            .map_err(|e| format!("prepare search: {}", e))?;
+pub fn search_with_conn(
+    conn: &Connection,
+    query: &str,
+    limit: Option<u32>,
+) -> Result<Vec<SearchHit>, String> {
+    let limit = limit.unwrap_or(10).min(50);
+    let sanitized = sanitize_fts_query(query);
+    if sanitized.is_empty() {
+        return Ok(Vec::new());
+    }
 
-        let rows = stmt
-            .query_map(params![sanitized, limit as i64], |row| {
-                Ok(SearchHit {
-                    id: row.get("id")?,
-                    title: row.get("title")?,
-                    description: row.get("description")?,
-                    topic: row.get("topic")?,
-                    memory_type: row.get("memory_type")?,
-                    project: row.get("project")?,
-                    snippet: row.get("snippet")?,
-                    score: row.get("score")?,
-                })
+    let mut stmt = conn
+        .prepare(
+            r#"SELECT m.id, m.title, m.description, m.topic, m.memory_type, m.project,
+                      snippet(memories_fts, 2, '[', ']', '...', 32) as snippet,
+                      bm25(memories_fts) as score
+               FROM memories_fts
+               JOIN memories m ON m.rowid = memories_fts.rowid
+               WHERE memories_fts MATCH ?1
+               ORDER BY score
+               LIMIT ?2"#,
+        )
+        .map_err(|e| format!("prepare search: {}", e))?;
+
+    let rows = stmt
+        .query_map(params![sanitized, limit as i64], |row| {
+            Ok(SearchHit {
+                id: row.get("id")?,
+                title: row.get("title")?,
+                description: row.get("description")?,
+                topic: row.get("topic")?,
+                memory_type: row.get("memory_type")?,
+                project: row.get("project")?,
+                snippet: row.get("snippet")?,
+                score: row.get("score")?,
             })
-            .map_err(|e| format!("query search: {}", e))?;
+        })
+        .map_err(|e| format!("query search: {}", e))?;
 
-        let mut hits = Vec::new();
-        for r in rows {
-            hits.push(r.map_err(|e| e.to_string())?);
-        }
+    let mut hits = Vec::new();
+    for r in rows {
+        hits.push(r.map_err(|e| e.to_string())?);
+    }
 
-        // Bump access count for returned hits
-        for hit in &hits {
-            let _ = conn.execute(
-                "UPDATE memories SET access_count = access_count + 1 WHERE id = ?1",
-                params![hit.id],
-            );
-        }
+    if !hits.is_empty() {
+        let hit_ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        bump_access_counts(conn, &hit_ids);
+    }
 
-        Ok(hits)
-    })
+    Ok(hits)
+}
+
+/// Increment `access_count` for a batch of memories in a single statement.
+/// Best-effort — errors are swallowed (missing counter updates are not fatal
+/// and we don't want to fail retrieval on a write hiccup).
+fn bump_access_counts(conn: &Connection, ids: &[&str]) {
+    if ids.is_empty() {
+        return;
+    }
+    let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{}", i)).collect();
+    let sql = format!(
+        "UPDATE memories SET access_count = access_count + 1 WHERE id IN ({})",
+        placeholders.join(", ")
+    );
+    let _ = conn.execute(&sql, rusqlite::params_from_iter(ids.iter().copied()));
 }
 
 #[cfg(test)]

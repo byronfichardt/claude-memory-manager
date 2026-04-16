@@ -1,203 +1,168 @@
 use serde::Serialize;
 use std::process::Command;
 
-use crate::services::{bootstrap, ingestion, organizer};
+use crate::services::installer::{
+    self, ConfigDirRegistration, SetupResult, UninstallReport, MCP_SERVER_NAME,
+    SETTING_CUSTOM_DB_DIR, SETTING_HOOK_ENABLED,
+};
+use crate::services::{bootstrap, organizer, portable};
 use crate::store::{edges, history, memories, settings, topics};
 
-const MCP_SERVER_NAME: &str = "claude-memory-manager";
 const SETTING_AUTO_ORGANIZE: &str = "auto_organize";
-const SETTING_CUSTOM_DB_DIR: &str = "custom_db_dir";
-const SETTING_HOOK_ENABLED: &str = "hook_enabled";
 
-#[derive(Serialize)]
-pub struct ConfigDirRegistration {
-    pub label: String,
-    pub path: String,
-    pub success: bool,
-    pub error: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct SetupResult {
-    pub bootstrap: bootstrap::BootstrapStatus,
-    pub ingestion: ingestion::IngestionReport,
-    pub mcp_registrations: Vec<ConfigDirRegistration>,
+/// Run a blocking closure on tauri's blocking thread pool. Use for any
+/// command that touches the SQLite pool or other blocking I/O — keeps the
+/// async runtime worker (and the IPC bridge) free.
+async fn blocking<F, R>(f: F) -> Result<R, String>
+where
+    F: FnOnce() -> Result<R, String> + Send + 'static,
+    R: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("blocking task join error: {}", e))?
 }
 
 #[tauri::command]
-pub fn get_bootstrap_status() -> Result<bootstrap::BootstrapStatus, String> {
-    bootstrap::get_status()
+pub async fn get_bootstrap_status() -> Result<bootstrap::BootstrapStatus, String> {
+    blocking(bootstrap::get_status).await
 }
 
 #[tauri::command]
-pub fn run_first_time_setup() -> Result<SetupResult, String> {
-    // Step 1: Write the managed section to every CLAUDE.md we can find
-    bootstrap::ensure_claude_md_all()?;
-
-    // Step 2: Ingest existing memory files from all configs
-    let report = ingestion::ingest_existing_files()?;
-
-    // Step 3: Register the MCP server in every config dir (best-effort)
-    let mcp_registrations = register_in_all_configs();
-
-    let status = bootstrap::get_status()?;
-    Ok(SetupResult {
-        bootstrap: status,
-        ingestion: report,
-        mcp_registrations,
-    })
-}
-
-/// Register the MCP server in every detected Claude config directory.
-fn register_in_all_configs() -> Vec<ConfigDirRegistration> {
-    let dirs = bootstrap::list_claude_config_dirs();
-    dirs.into_iter()
-        .map(|(label, dir)| {
-            let path_str = dir.to_string_lossy().to_string();
-            match register_mcp_in_dir(&dir) {
-                Ok(_) => ConfigDirRegistration {
-                    label,
-                    path: path_str,
-                    success: true,
-                    error: None,
-                },
-                Err(e) => ConfigDirRegistration {
-                    label,
-                    path: path_str,
-                    success: false,
-                    error: Some(e),
-                },
-            }
-        })
-        .collect()
-}
-
-/// Register the MCP server in a specific config dir by setting CLAUDE_CONFIG_DIR
-/// when invoking the claude CLI, AND writing to that dir's settings.json.
-/// Also installs the UserPromptSubmit hook for deterministic memory retrieval.
-fn register_mcp_in_dir(config_dir: &std::path::Path) -> Result<(), String> {
-    let binary = std::env::current_exe()
-        .map_err(|e| format!("Failed to get binary path: {}", e))?
-        .to_string_lossy()
-        .to_string();
-
-    // Remove existing (ignore errors)
-    let _ = Command::new("claude")
-        .env("CLAUDE_CONFIG_DIR", config_dir)
-        .args(["mcp", "remove", MCP_SERVER_NAME, "--scope", "user"])
-        .output();
-
-    let mut add_args = vec![
-        "mcp".to_string(),
-        "add".to_string(),
-        MCP_SERVER_NAME.to_string(),
-        "--scope".to_string(),
-        "user".to_string(),
-    ];
-
-    // If user has set a custom DB dir, pass it via --env so the MCP server
-    // child process inherits it. This is the WithSecure XFENCE escape hatch.
-    let custom_db = settings::get(SETTING_CUSTOM_DB_DIR, "").unwrap_or_default();
-    if !custom_db.is_empty() {
-        add_args.push("--env".to_string());
-        add_args.push(format!("CLAUDE_MEMORY_DB_DIR={}", custom_db));
-    }
-
-    add_args.push("--".to_string());
-    add_args.push(binary.clone());
-    add_args.push("--mcp-server".to_string());
-
-    let output = Command::new("claude")
-        .env("CLAUDE_CONFIG_DIR", config_dir)
-        .args(&add_args)
-        .output()
-        .map_err(|e| format!("Failed to run 'claude mcp add' for {}: {}", config_dir.display(), e))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "claude mcp add ({}) failed: {}",
-            config_dir.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-
-    bootstrap::ensure_mcp_permissions_in(config_dir)?;
-
-    // Install the UserPromptSubmit hook for deterministic memory retrieval
-    // (respect the user's auto_hook preference; default on)
-    if settings::get_bool(SETTING_HOOK_ENABLED, true).unwrap_or(true) {
-        let _ = bootstrap::ensure_memory_hook_in(config_dir, &binary);
-    }
-
-    Ok(())
+pub async fn get_startup_errors() -> Vec<String> {
+    blocking(|| Ok(crate::store::get_startup_errors()))
+        .await
+        .unwrap_or_default()
 }
 
 #[tauri::command]
-pub fn store_list_memories() -> Result<Vec<memories::Memory>, String> {
-    memories::list_all()
+pub async fn run_first_time_setup() -> Result<SetupResult, String> {
+    blocking(installer::run_first_time_setup).await
 }
 
 #[tauri::command]
-pub fn store_list_memories_by_topic(topic: String) -> Result<Vec<memories::Memory>, String> {
-    memories::list_by_topic(&topic)
+pub async fn uninstall_everything() -> Result<UninstallReport, String> {
+    blocking(|| Ok(installer::uninstall_everything())).await
 }
 
 #[tauri::command]
-pub fn fetch_memory(id: String) -> Result<Option<memories::Memory>, String> {
-    memories::get(&id)
+pub async fn store_list_memories() -> Result<Vec<memories::Memory>, String> {
+    blocking(memories::list_all).await
 }
 
 #[tauri::command]
-pub fn search_memories_fts(
+pub async fn store_list_memories_by_topic(topic: String) -> Result<Vec<memories::Memory>, String> {
+    blocking(move || memories::list_by_topic(&topic)).await
+}
+
+#[tauri::command]
+pub async fn fetch_memory(id: String) -> Result<Option<memories::Memory>, String> {
+    blocking(move || memories::get(&id)).await
+}
+
+#[tauri::command]
+pub async fn search_memories_fts(
     query: String,
     limit: Option<u32>,
 ) -> Result<Vec<memories::SearchHit>, String> {
-    memories::search(&query, limit)
+    blocking(move || memories::search(&query, limit)).await
 }
 
 #[tauri::command]
-pub fn list_topics() -> Result<Vec<topics::Topic>, String> {
-    topics::list_all()
+pub async fn list_topics() -> Result<Vec<topics::Topic>, String> {
+    blocking(topics::list_all).await
 }
 
 #[tauri::command]
-pub fn store_add_memory(
+pub async fn store_add_memory(
     title: String,
     description: String,
     content: String,
     memory_type: Option<String>,
     topic: Option<String>,
 ) -> Result<memories::Memory, String> {
-    memories::insert(memories::NewMemory {
-        title,
-        description,
-        content,
-        memory_type,
-        topic,
-        source: Some("manual".to_string()),
-        project: None,
+    blocking(move || {
+        memories::insert(memories::NewMemory {
+            title,
+            description,
+            content,
+            memory_type,
+            topic,
+            source: Some("manual".to_string()),
+            project: None,
+        })
     })
+    .await
 }
 
 #[tauri::command]
-pub fn store_update_memory(
+pub async fn store_update_memory(
     id: String,
     title: String,
     description: String,
     content: String,
     topic: Option<String>,
 ) -> Result<memories::Memory, String> {
-    memories::update(&id, &title, &description, &content, topic.as_deref())
+    blocking(move || {
+        memories::update(&id, &title, &description, &content, topic.as_deref())
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn store_delete_memory(id: String) -> Result<(), String> {
-    memories::delete(&id)
+pub async fn store_delete_memory(id: String) -> Result<(), String> {
+    blocking(move || memories::delete(&id)).await
 }
 
 #[tauri::command]
-pub fn store_memory_count() -> Result<i64, String> {
-    memories::count()
+pub async fn store_memory_count() -> Result<i64, String> {
+    blocking(memories::count).await
+}
+
+#[derive(Serialize)]
+pub struct ExportSummary {
+    pub path: String,
+    pub memory_count: usize,
+    pub bytes_written: usize,
+}
+
+/// Serialize the entire memory store to a JSON bundle and write it to `path`.
+/// The frontend picks the path via the dialog plugin's `save()` and passes it
+/// here — we do the actual I/O in Rust to keep capability surface minimal.
+#[tauri::command]
+pub fn export_memories(path: String) -> Result<ExportSummary, String> {
+    let json = portable::build_export()?;
+    let bytes_written = json.len();
+    std::fs::write(&path, &json).map_err(|e| format!("write {}: {}", path, e))?;
+
+    // Re-parse just enough to report the count back to the UI without a DB
+    // roundtrip. Cheap since we already have the string.
+    let memory_count = serde_json::from_str::<serde_json::Value>(&json)
+        .ok()
+        .and_then(|v| v.get("memory_count").and_then(|n| n.as_u64()))
+        .unwrap_or(0) as usize;
+
+    Ok(ExportSummary {
+        path,
+        memory_count,
+        bytes_written,
+    })
+}
+
+/// Read a JSON bundle from `path` and import it. `mode` must be `"merge"` or
+/// `"replace"`.
+#[tauri::command]
+pub fn import_memories(
+    path: String,
+    mode: String,
+) -> Result<portable::ImportReport, String> {
+    let mode = match mode.as_str() {
+        "merge" => portable::ImportMode::Merge,
+        "replace" => portable::ImportMode::Replace,
+        other => return Err(format!("invalid import mode '{}'", other)),
+    };
+    let json = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {}", path, e))?;
+    portable::import_bundle(&json, mode)
 }
 
 #[derive(Serialize)]
@@ -217,10 +182,13 @@ pub struct McpStatus {
 /// Register the MCP server in every detected Claude config directory.
 #[tauri::command]
 pub fn register_mcp_server() -> Result<Vec<ConfigDirRegistration>, String> {
-    let results = register_in_all_configs();
-    if results.is_empty() {
-        return Err("No Claude config directories found".to_string());
+    if bootstrap::list_claude_config_dirs().is_empty() {
+        return Err(bootstrap::ERR_NO_CLAUDE_INSTALL.to_string());
     }
+    if !bootstrap::is_claude_cli_available() {
+        return Err(bootstrap::ERR_NO_CLAUDE_CLI.to_string());
+    }
+    let results = installer::register_in_all_configs();
     Ok(results)
 }
 
@@ -232,7 +200,7 @@ pub fn unregister_mcp_server() -> Result<Vec<ConfigDirRegistration>, String> {
         .into_iter()
         .map(|(label, dir)| {
             let path_str = dir.to_string_lossy().to_string();
-            let result = Command::new("claude")
+            let result = Command::new(bootstrap::claude_binary_path())
                 .env("CLAUDE_CONFIG_DIR", &dir)
                 .args(["mcp", "remove", MCP_SERVER_NAME, "--scope", "user"])
                 .output();
@@ -267,8 +235,8 @@ pub fn unregister_mcp_server() -> Result<Vec<ConfigDirRegistration>, String> {
 // Organizer commands
 
 #[tauri::command]
-pub async fn run_organize_pass() -> Result<organizer::OrganizerReport, String> {
-    organizer::run_full_pass().await
+pub async fn run_organize_pass(app: tauri::AppHandle) -> Result<organizer::OrganizerReport, String> {
+    organizer::run_full_pass(Some(app)).await
 }
 
 /// Run ONLY the topic consolidation phase. Useful for cleaning up an already-classified store.
@@ -281,33 +249,33 @@ pub async fn run_consolidate_topics() -> Result<organizer::OrganizerReport, Stri
 }
 
 #[tauri::command]
-pub fn undo_last_organize() -> Result<String, String> {
-    organizer::undo_last()
+pub async fn undo_last_organize() -> Result<String, String> {
+    blocking(organizer::undo_last).await
 }
 
 #[tauri::command]
-pub fn list_history(limit: Option<i64>) -> Result<Vec<history::HistoryEntry>, String> {
-    history::list_recent(limit.unwrap_or(20))
+pub async fn list_history(limit: Option<i64>) -> Result<Vec<history::HistoryEntry>, String> {
+    blocking(move || history::list_recent(limit.unwrap_or(20))).await
 }
 
 #[tauri::command]
-pub fn get_auto_organize() -> Result<bool, String> {
-    settings::get_bool(SETTING_AUTO_ORGANIZE, true)
+pub async fn get_auto_organize() -> Result<bool, String> {
+    blocking(|| settings::get_bool(SETTING_AUTO_ORGANIZE, false)).await
 }
 
 #[tauri::command]
-pub fn set_auto_organize(enabled: bool) -> Result<(), String> {
-    settings::set_bool(SETTING_AUTO_ORGANIZE, enabled)
+pub async fn set_auto_organize(enabled: bool) -> Result<(), String> {
+    blocking(move || settings::set_bool(SETTING_AUTO_ORGANIZE, enabled)).await
 }
 
 #[tauri::command]
-pub fn get_custom_db_dir() -> Result<String, String> {
-    settings::get(SETTING_CUSTOM_DB_DIR, "")
+pub async fn get_custom_db_dir() -> Result<String, String> {
+    blocking(|| settings::get(SETTING_CUSTOM_DB_DIR, "")).await
 }
 
 #[tauri::command]
-pub fn set_custom_db_dir(path: String) -> Result<(), String> {
-    settings::set(SETTING_CUSTOM_DB_DIR, &path)
+pub async fn set_custom_db_dir(path: String) -> Result<(), String> {
+    blocking(move || settings::set(SETTING_CUSTOM_DB_DIR, &path)).await
 }
 
 #[derive(Serialize)]
@@ -324,21 +292,24 @@ pub struct ConfigDirHookStatus {
 }
 
 #[tauri::command]
-pub fn get_hook_status() -> Result<HookStatus, String> {
-    let enabled = settings::get_bool(SETTING_HOOK_ENABLED, true)?;
-    let dirs = bootstrap::list_claude_config_dirs();
-    let per_config = dirs
-        .into_iter()
-        .map(|(label, dir)| ConfigDirHookStatus {
-            label,
-            path: dir.to_string_lossy().to_string(),
-            installed: bootstrap::is_hook_installed_in(&dir),
+pub async fn get_hook_status() -> Result<HookStatus, String> {
+    blocking(|| {
+        let enabled = settings::get_bool(SETTING_HOOK_ENABLED, true)?;
+        let dirs = bootstrap::list_claude_config_dirs();
+        let per_config = dirs
+            .into_iter()
+            .map(|(label, dir)| ConfigDirHookStatus {
+                label,
+                path: dir.to_string_lossy().to_string(),
+                installed: bootstrap::is_hook_installed_in(&dir),
+            })
+            .collect();
+        Ok(HookStatus {
+            enabled,
+            per_config,
         })
-        .collect();
-    Ok(HookStatus {
-        enabled,
-        per_config,
     })
+    .await
 }
 
 #[tauri::command]
@@ -399,56 +370,61 @@ pub struct RelatedMemoriesResponse {
 }
 
 #[tauri::command]
-pub fn get_related_memories(id: String, depth: Option<u32>) -> Result<RelatedMemoriesResponse, String> {
-    let depth = depth.unwrap_or(1).min(3);
+pub async fn get_related_memories(id: String, depth: Option<u32>) -> Result<RelatedMemoriesResponse, String> {
+    blocking(move || {
+        let depth = depth.unwrap_or(1).min(3);
 
-    let edge_list = if depth <= 1 {
-        edges::get_neighbors(&id)?
-    } else {
-        edges::get_neighbors_deep(&id, depth)?
-    };
+        let edge_list = if depth <= 1 {
+            edges::get_neighbors(&id)?
+        } else {
+            edges::get_neighbors_deep(&id, depth)?
+        };
 
-    // Collect unique neighbor IDs
-    let mut neighbor_ids: Vec<String> = Vec::new();
-    for edge in &edge_list {
-        for candidate in [&edge.source_id, &edge.target_id] {
-            if candidate.as_str() != id && !neighbor_ids.contains(candidate) {
-                neighbor_ids.push(candidate.clone());
+        let mut neighbor_ids: Vec<String> = Vec::new();
+        for edge in &edge_list {
+            for candidate in [&edge.source_id, &edge.target_id] {
+                if candidate.as_str() != id && !neighbor_ids.contains(candidate) {
+                    neighbor_ids.push(candidate.clone());
+                }
             }
         }
-    }
 
-    // Fetch neighbor memories
-    let id_refs: Vec<&str> = neighbor_ids.iter().map(|s| s.as_str()).collect();
-    let neighbor_memories = memories::get_by_ids(&id_refs)?;
-    let mem_map: std::collections::HashMap<String, memories::Memory> = neighbor_memories
-        .into_iter()
-        .map(|m| (m.id.clone(), m))
-        .collect();
+        let id_refs: Vec<&str> = neighbor_ids.iter().map(|s| s.as_str()).collect();
+        let neighbor_memories = memories::get_by_ids(&id_refs)?;
+        let mem_map: std::collections::HashMap<String, memories::Memory> = neighbor_memories
+            .into_iter()
+            .map(|m| (m.id.clone(), m))
+            .collect();
 
-    let mut related = Vec::new();
-    for edge in &edge_list {
-        let other_id = if edge.source_id == id {
-            &edge.target_id
-        } else {
-            &edge.source_id
-        };
-        if let Some(mem) = mem_map.get(other_id) {
-            related.push(RelatedMemoryEntry {
-                edge: edge.clone(),
-                memory: mem.clone(),
-            });
+        let mut related = Vec::new();
+        for edge in &edge_list {
+            let other_id = if edge.source_id == id {
+                &edge.target_id
+            } else {
+                &edge.source_id
+            };
+            if let Some(mem) = mem_map.get(other_id) {
+                related.push(RelatedMemoryEntry {
+                    edge: edge.clone(),
+                    memory: mem.clone(),
+                });
+            }
         }
-    }
 
-    Ok(RelatedMemoriesResponse {
-        edges: edge_list,
-        related,
+        Ok(RelatedMemoriesResponse {
+            edges: edge_list,
+            related,
+        })
     })
+    .await
 }
 
 #[tauri::command]
-pub fn get_mcp_server_status() -> Result<McpStatus, String> {
+pub async fn get_mcp_server_status() -> Result<McpStatus, String> {
+    blocking(get_mcp_server_status_sync).await
+}
+
+fn get_mcp_server_status_sync() -> Result<McpStatus, String> {
     let binary = std::env::current_exe()
         .map_err(|e| format!("Failed to get binary path: {}", e))?
         .to_string_lossy()

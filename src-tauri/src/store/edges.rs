@@ -125,43 +125,96 @@ pub fn get_neighbors_with_conn(conn: &Connection, memory_id: &str) -> Result<Vec
 /// Get all edges connected to any of the given memory IDs (1-hop batch query).
 /// Used by the hook for efficient graph expansion.
 pub fn get_neighbors_batch(ids: &[&str]) -> Result<Vec<MemoryEdge>, String> {
+    with_conn(|conn| get_neighbors_batch_with_conn(conn, ids))
+}
+
+pub fn get_neighbors_batch_with_conn(
+    conn: &Connection,
+    ids: &[&str],
+) -> Result<Vec<MemoryEdge>, String> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
 
-    with_conn(|conn| {
-        // Build dynamic IN clause
-        let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{}", i)).collect();
-        let in_clause = placeholders.join(", ");
+    // UNION over two single-column IN clauses lets SQLite use
+    // idx_edges_source and idx_edges_target as index seeks (an OR of two INs
+    // collapses to a scan) and each id binds once per branch.
+    let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{}", i)).collect();
+    let in_clause = placeholders.join(", ");
 
-        let sql = format!(
-            "SELECT * FROM memory_edges WHERE source_id IN ({in_clause}) OR target_id IN ({in_clause}) ORDER BY weight DESC"
-        );
+    let sql = format!(
+        r#"SELECT * FROM memory_edges WHERE source_id IN ({in_clause})
+           UNION
+           SELECT * FROM memory_edges WHERE target_id IN ({in_clause})
+           ORDER BY weight DESC"#
+    );
 
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare get_neighbors_batch: {}", e))?;
+
+    let params_iter = ids.iter().copied().chain(ids.iter().copied());
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params_iter), row_to_edge)
+        .map_err(|e| format!("query get_neighbors_batch: {}", e))?;
+
+    let mut edges = Vec::new();
+    for r in rows {
+        edges.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(edges)
+}
+
+/// Create or strengthen co-access edges between all (i, j) pairs from `ids` in
+/// a single transaction with one prepared statement. Replaces the old
+/// N²-roundtrip pattern the hook ran on every prompt: per pair, one INSERT
+/// plus one UPDATE — 20 sequential writes for 5 hits.
+///
+/// The upsert handles both "new edge" and "strengthen existing": the initial
+/// weight is used on first insert; on conflict the existing weight is bumped
+/// by `delta` (capped at 1.0). Collapses to 1 transaction + N² stmt executions
+/// reusing a cached prepared statement.
+pub fn strengthen_co_access_batch(
+    conn: &Connection,
+    ids: &[&str],
+    initial_weight: f64,
+    delta: f64,
+) -> Result<(), String> {
+    if ids.len() < 2 {
+        return Ok(());
+    }
+
+    let now = now_ts();
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin co-access tx: {}", e))?;
+
+    let result = (|| -> Result<(), String> {
         let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| format!("prepare get_neighbors_batch: {}", e))?;
+            .prepare(
+                r#"INSERT INTO memory_edges (source_id, target_id, edge_type, weight, source_origin, created_at, updated_at)
+                   VALUES (?1, ?2, 'relates-to', ?3, 'co_access', ?4, ?4)
+                   ON CONFLICT(source_id, target_id, edge_type) DO UPDATE SET
+                       weight = MIN(1.0, weight + ?5),
+                       updated_at = ?4"#,
+            )
+            .map_err(|e| format!("prepare co-access upsert: {}", e))?;
 
-        // Bind each ID twice (once for source_id IN, once for target_id IN)
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        for id in ids {
-            param_values.push(Box::new(id.to_string()));
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                stmt.execute(params![ids[i], ids[j], initial_weight, now, delta])
+                    .map_err(|e| format!("co-access upsert: {}", e))?;
+            }
         }
-        for id in ids {
-            param_values.push(Box::new(id.to_string()));
-        }
+        Ok(())
+    })();
 
-        let refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|b| b.as_ref()).collect();
-        let rows = stmt
-            .query_map(refs.as_slice(), row_to_edge)
-            .map_err(|e| format!("query get_neighbors_batch: {}", e))?;
-
-        let mut edges = Vec::new();
-        for r in rows {
-            edges.push(r.map_err(|e| e.to_string())?);
-        }
-        Ok(edges)
-    })
+    if result.is_ok() {
+        conn.execute_batch("COMMIT")
+            .map_err(|e| format!("commit co-access tx: {}", e))?;
+    } else {
+        let _ = conn.execute_batch("ROLLBACK");
+    }
+    result
 }
 
 /// Get neighbors up to N hops using a recursive CTE.

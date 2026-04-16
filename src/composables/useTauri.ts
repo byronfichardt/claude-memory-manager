@@ -12,12 +12,17 @@ import type {
   OrganizerReport,
   HistoryEntry,
   RelatedMemoriesResponse,
+  UninstallReport,
+  ExportSummary,
+  ImportMode,
+  ImportReport,
 } from "@/types";
 
 export function useTauri() {
   return {
     // Bootstrap & setup
     getBootstrapStatus: () => invoke<BootstrapStatus>("get_bootstrap_status"),
+    getStartupErrors: () => invoke<string[]>("get_startup_errors"),
     runFirstTimeSetup: () => invoke<SetupResult>("run_first_time_setup"),
 
     // Memories
@@ -84,5 +89,13 @@ export function useTauri() {
     setAutoOrganize: (enabled: boolean) =>
       invoke<void>("set_auto_organize", { enabled }),
 
+    // Uninstall
+    uninstallEverything: () => invoke<UninstallReport>("uninstall_everything"),
+
+    // Export / import
+    exportMemories: (path: string) =>
+      invoke<ExportSummary>("export_memories", { path }),
+    importMemories: (path: string, mode: ImportMode) =>
+      invoke<ImportReport>("import_memories", { path, mode }),
   };
 }

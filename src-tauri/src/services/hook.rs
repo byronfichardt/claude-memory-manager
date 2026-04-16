@@ -13,6 +13,8 @@
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+use rusqlite::Connection;
+
 use crate::services::project;
 use crate::store::{self, edges, memories};
 
@@ -25,7 +27,6 @@ const MAX_TITLE_LEN: usize = 80;
 struct HookEvent {
     #[serde(default)]
     prompt: String,
-    #[allow(dead_code)]
     #[serde(default)]
     session_id: String,
     #[serde(default)]
@@ -72,18 +73,23 @@ pub fn run() -> Result<(), String> {
         return Ok(());
     }
 
-    // Initialize the store (cheap with WAL mode SQLite)
-    store::init().map_err(|e| format!("store init: {}", e))?;
+    // Hook runs as a fresh process per prompt — use a single raw connection
+    // rather than spinning up a pool with a WAL checkpoint on every invoke.
+    let conn = store::open_hook_connection().map_err(|e| format!("store init: {}", e))?;
 
     // Detect active project once per invocation — reused for retrieval and save.
     let active_project = detect_active_project(&event);
+
+    // Publish the pointer so the MCP server (which doesn't see transcript_path)
+    // can scope memory_add / memory_search to the same project the hook sees.
+    project::write_active_project(&event.session_id, active_project.as_deref());
 
     let mut out = String::new();
 
     // Check for explicit "remember this" directive. If found, save it directly
     // as a deterministic manual memory.
     if let Some(text_to_save) = extract_remember_directive(&event.prompt) {
-        match save_user_memory(text_to_save, active_project.as_deref()) {
+        match save_user_memory(&conn, text_to_save, active_project.as_deref()) {
             Ok(title) => {
                 out.push_str("<memory-saved>\n");
                 out.push_str(&format!(
@@ -102,7 +108,7 @@ pub fn run() -> Result<(), String> {
     }
 
     // Hybrid retrieval: FTS5 + graph expansion + re-ranking + project affinity
-    let final_hits = hybrid_search(&event.prompt, active_project.as_deref())?;
+    let final_hits = hybrid_search(&conn, &event.prompt, active_project.as_deref())?;
 
     if !final_hits.is_empty() {
         out.push_str("<memory-context>\n");
@@ -126,10 +132,16 @@ pub fn run() -> Result<(), String> {
 
         out.push_str("</memory-context>\n");
 
-        // Strengthen co-access edges between results (fire-and-forget)
+        // Strengthen co-access edges between results — one batched upsert
+        // inside a single transaction instead of 2×N² sequential writes.
         if final_hits.len() > 1 {
             let ids: Vec<&str> = final_hits.iter().map(|h| h.id.as_str()).collect();
-            strengthen_co_access(&ids);
+            let _ = edges::strengthen_co_access_batch(
+                &conn,
+                &ids,
+                CO_ACCESS_INITIAL_WEIGHT,
+                CO_ACCESS_DELTA,
+            );
         }
     }
 
@@ -154,35 +166,6 @@ const GRAPH_WEIGHT: f64 = 0.3;
 const CO_ACCESS_INITIAL_WEIGHT: f64 = 0.1;
 const CO_ACCESS_DELTA: f64 = 0.05;
 
-// Project affinity — additive boosts based on relationship between the memory's
-// project and the active project for this session.
-const PROJECT_AFFINITY_EXACT: f64 = 0.40;
-const PROJECT_AFFINITY_SHARED_PARENT: f64 = 0.15;
-const PROJECT_AFFINITY_UNRELATED: f64 = -0.20;
-
-/// Compute the project-affinity boost for a memory given the current active project.
-/// - None active → 0 (graceful degradation when we can't detect current project)
-/// - Memory is global (NULL project) → 0 (neutral, globals always apply)
-/// - Exact match → +0.40
-/// - Shared immediate parent directory → +0.15
-/// - Different project → -0.20
-fn project_affinity(memory_project: Option<&str>, current: Option<&Path>) -> f64 {
-    match (memory_project, current) {
-        (_, None) => 0.0,
-        (None, Some(_)) => 0.0,
-        (Some(mp), Some(cp)) => {
-            let mp_path = Path::new(mp);
-            if mp_path == cp {
-                PROJECT_AFFINITY_EXACT
-            } else if project::shared_parent(mp_path, cp) {
-                PROJECT_AFFINITY_SHARED_PARENT
-            } else {
-                PROJECT_AFFINITY_UNRELATED
-            }
-        }
-    }
-}
-
 /// Hybrid search: FTS5 keyword search + 1-hop graph expansion + re-ranking + project affinity.
 ///
 /// 1. Over-fetch FTS candidates (10 instead of 5)
@@ -191,11 +174,12 @@ fn project_affinity(memory_project: Option<&str>, current: Option<&Path>) -> f64
 /// 4. Re-rank using combined FTS + graph + project affinity score
 /// 5. Return top MAX_RESULTS
 fn hybrid_search(
+    conn: &Connection,
     prompt: &str,
     current_project: Option<&Path>,
 ) -> Result<Vec<memories::SearchHit>, String> {
     // Step 1: Get FTS candidates (over-fetch for re-ranking headroom)
-    let fts_hits = memories::search(prompt, Some(FTS_OVERFETCH))
+    let fts_hits = memories::search_with_conn(conn, prompt, Some(FTS_OVERFETCH))
         .map_err(|e| format!("search: {}", e))?;
 
     if fts_hits.is_empty() {
@@ -204,7 +188,7 @@ fn hybrid_search(
 
     // Step 2: Get 1-hop graph neighbors
     let fts_ids: Vec<&str> = fts_hits.iter().map(|h| h.id.as_str()).collect();
-    let neighbor_edges = edges::get_neighbors_batch(&fts_ids).unwrap_or_default();
+    let neighbor_edges = edges::get_neighbors_batch_with_conn(conn, &fts_ids).unwrap_or_default();
 
     // If no edges exist yet, just return the top FTS hits directly
     if neighbor_edges.is_empty() {
@@ -287,7 +271,7 @@ fn hybrid_search(
             .get(&hit.id)
             .map(|(sum, count)| if *count > 0 { sum / *count as f64 } else { 0.0 })
             .unwrap_or(0.0);
-        let affinity = project_affinity(hit.project.as_deref(), current_project);
+        let affinity = project::project_affinity(hit.project.as_deref(), current_project);
         let combined = FTS_WEIGHT * norm_fts + GRAPH_WEIGHT * g_boost + affinity;
         scored.push(ScoredHit { hit, combined_score: combined });
     }
@@ -295,13 +279,13 @@ fn hybrid_search(
     // Fetch and score graph-only neighbors (no FTS signal)
     if !neighbor_ids.is_empty() {
         let id_refs: Vec<&str> = neighbor_ids.iter().map(|s| s.as_str()).collect();
-        if let Ok(neighbor_memories) = memories::get_by_ids(&id_refs) {
+        if let Ok(neighbor_memories) = memories::get_by_ids_with_conn(conn, &id_refs) {
             for mem in neighbor_memories {
                 let g_boost = graph_boost
                     .get(&mem.id)
                     .map(|(sum, count)| if *count > 0 { sum / *count as f64 } else { 0.0 })
                     .unwrap_or(0.0);
-                let affinity = project_affinity(mem.project.as_deref(), current_project);
+                let affinity = project::project_affinity(mem.project.as_deref(), current_project);
                 let combined = GRAPH_WEIGHT * g_boost + affinity; // No FTS signal
 
                 // Convert Memory to SearchHit for uniform output
@@ -334,18 +318,6 @@ fn hybrid_search(
         .collect();
 
     Ok(results)
-}
-
-/// Create or strengthen co-access edges between memories that appeared together in results.
-fn strengthen_co_access(ids: &[&str]) {
-    for i in 0..ids.len() {
-        for j in (i + 1)..ids.len() {
-            // Insert with low initial weight (no-op if already exists with higher weight)
-            let _ = edges::insert(ids[i], ids[j], "relates-to", CO_ACCESS_INITIAL_WEIGHT, "co_access");
-            // Bump weight for repeated co-occurrence
-            let _ = edges::strengthen(ids[i], ids[j], "relates-to", CO_ACCESS_DELTA);
-        }
-    }
 }
 
 /// Detects explicit save-to-memory directives at the start of a user prompt.
@@ -388,22 +360,29 @@ fn extract_remember_directive(prompt: &str) -> Option<String> {
 /// NOTE: `remember:` directives are currently classified as type=user, which is
 /// always global per scope rules. The `active_project` param is plumbed through
 /// for future directives that support scoped saves (e.g. `remember-here:`).
-fn save_user_memory(text: String, active_project: Option<&Path>) -> Result<String, String> {
+fn save_user_memory(
+    conn: &Connection,
+    text: String,
+    active_project: Option<&Path>,
+) -> Result<String, String> {
     let title = derive_title(&text);
     let description = String::new();
 
     let memory_type = Some("user".to_string());
     let project = project::resolve_memory_scope(memory_type.as_deref(), None, active_project);
 
-    let memory = memories::insert(memories::NewMemory {
-        title: title.clone(),
-        description,
-        content: text,
-        memory_type,
-        topic: None,
-        source: Some("user_remember_directive".to_string()),
-        project,
-    })?;
+    let memory = memories::insert_with_conn(
+        conn,
+        memories::NewMemory {
+            title: title.clone(),
+            description,
+            content: text,
+            memory_type,
+            topic: None,
+            source: Some("user_remember_directive".to_string()),
+            project,
+        },
+    )?;
 
     Ok(memory.title)
 }

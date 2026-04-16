@@ -3,6 +3,14 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// How long an active-project pointer stays valid. After this, the MCP server
+/// ignores it and falls back to its startup cwd.
+const ACTIVE_PROJECT_TTL_SECS: u64 = 600;
+
+/// Filename (inside the memory manager data dir) for the hook→MCP project pointer.
+const ACTIVE_PROJECT_FILENAME: &str = "active-project.json";
 
 /// Walk upward from `start` looking for a `.git` directory or file (worktree).
 /// Stops at `$HOME` or filesystem root.
@@ -43,6 +51,35 @@ pub fn shared_parent(a: &Path, b: &Path) -> bool {
     match (a.parent(), b.parent()) {
         (Some(pa), Some(pb)) => pa == pb,
         _ => false,
+    }
+}
+
+// Project-affinity scoring — additive re-rank boosts applied by the hook and
+// the MCP memory_search tool when a current project is known.
+pub const PROJECT_AFFINITY_EXACT: f64 = 0.40;
+pub const PROJECT_AFFINITY_SHARED_PARENT: f64 = 0.15;
+pub const PROJECT_AFFINITY_UNRELATED: f64 = -0.20;
+
+/// Compute the project-affinity boost for a memory given the current active project.
+/// - No active project → 0 (graceful degradation)
+/// - Memory is global (NULL project) → 0 (globals always apply, neutral)
+/// - Exact match → +0.40
+/// - Shared immediate parent directory → +0.15
+/// - Different project → -0.20
+pub fn project_affinity(memory_project: Option<&str>, current: Option<&Path>) -> f64 {
+    match (memory_project, current) {
+        (_, None) => 0.0,
+        (None, Some(_)) => 0.0,
+        (Some(mp), Some(cp)) => {
+            let mp_path = Path::new(mp);
+            if mp_path == cp {
+                PROJECT_AFFINITY_EXACT
+            } else if shared_parent(mp_path, cp) {
+                PROJECT_AFFINITY_SHARED_PARENT
+            } else {
+                PROJECT_AFFINITY_UNRELATED
+            }
+        }
     }
 }
 
@@ -212,6 +249,124 @@ fn extract_abs_paths_from_bash(cmd: &str) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// Path to the active-project pointer file. Lives alongside `memories.db` so
+/// the hook (writer) and MCP server (reader) agree without extra config.
+pub fn active_project_path() -> PathBuf {
+    crate::store::data_dir().join(ACTIVE_PROJECT_FILENAME)
+}
+
+/// Write the detected active project for `session_id` to the pointer file.
+/// Best-effort: returns early on any IO/serialization error. Uses a temp-file
+/// rename for atomicity so a concurrent reader never sees a truncated file.
+///
+/// `project == None` clears this session's pointer (records it explicitly as
+/// "no project"), so a session moving from a repo to a non-repo dir doesn't
+/// leak the stale project.
+pub fn write_active_project(session_id: &str, project: Option<&Path>) {
+    write_active_project_at(&active_project_path(), session_id, project, now_unix());
+}
+
+fn write_active_project_at(
+    path: &Path,
+    session_id: &str,
+    project: Option<&Path>,
+    now: u64,
+) {
+    if session_id.is_empty() {
+        return;
+    }
+
+    let mut root = read_json(path).unwrap_or_else(|| serde_json::json!({ "sessions": {} }));
+
+    let sessions = root
+        .get_mut("sessions")
+        .and_then(|v| v.as_object_mut())
+        .cloned()
+        .unwrap_or_default();
+    let mut sessions = sessions;
+
+    prune_expired_sessions(&mut sessions, now);
+
+    let entry = serde_json::json!({
+        "project": project.map(|p| p.to_string_lossy().to_string()),
+        "updated_at": now,
+    });
+    sessions.insert(session_id.to_string(), entry);
+
+    root["sessions"] = serde_json::Value::Object(sessions);
+
+    let _ = atomic_write_json(path, &root);
+}
+
+/// Read the freshest non-expired project pointer across all sessions.
+/// Returns None if the file is missing, unreadable, or every entry is stale /
+/// has `project == null`.
+///
+/// When multiple Claude sessions are active, we return the most recently
+/// updated one — almost always the session that just fired a prompt.
+pub fn read_active_project() -> Option<PathBuf> {
+    read_active_project_at(&active_project_path(), now_unix())
+}
+
+fn read_active_project_at(path: &Path, now: u64) -> Option<PathBuf> {
+    let root = read_json(path)?;
+    let sessions = root.get("sessions")?.as_object()?;
+
+    let mut best: Option<(u64, PathBuf)> = None;
+    for (_sid, entry) in sessions {
+        let Some(updated_at) = entry.get("updated_at").and_then(|v| v.as_u64()) else {
+            continue;
+        };
+        if now.saturating_sub(updated_at) > ACTIVE_PROJECT_TTL_SECS {
+            continue;
+        }
+        let Some(project_str) = entry.get("project").and_then(|v| v.as_str()) else {
+            // project is explicit None for this session — skip
+            continue;
+        };
+        if project_str.is_empty() {
+            continue;
+        }
+        let candidate = PathBuf::from(project_str);
+        match &best {
+            Some((best_ts, _)) if *best_ts >= updated_at => {}
+            _ => best = Some((updated_at, candidate)),
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+fn prune_expired_sessions(sessions: &mut serde_json::Map<String, serde_json::Value>, now: u64) {
+    sessions.retain(|_, entry| {
+        entry
+            .get("updated_at")
+            .and_then(|v| v.as_u64())
+            .map(|ts| now.saturating_sub(ts) <= ACTIVE_PROJECT_TTL_SECS)
+            .unwrap_or(false)
+    });
+}
+
+fn read_json(path: &Path) -> Option<serde_json::Value> {
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+fn atomic_write_json(path: &Path, value: &serde_json::Value) -> std::io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(value)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -385,6 +540,72 @@ mod tests {
         let transcript = root.join("empty.jsonl");
         fs::write(&transcript, "").unwrap();
         assert!(infer_project_from_transcript(&transcript).is_none());
+    }
+
+    #[test]
+    fn active_project_roundtrip_returns_written_path() {
+        let dir = tmpdir();
+        let file = dir.join("active.json");
+        let project = PathBuf::from("/Users/byron/projects/personal/hearth");
+
+        write_active_project_at(&file, "sess-1", Some(&project), 1_000);
+        let got = read_active_project_at(&file, 1_000);
+        assert_eq!(got, Some(project));
+    }
+
+    #[test]
+    fn active_project_picks_most_recent_session() {
+        let dir = tmpdir();
+        let file = dir.join("active.json");
+        let hearth = PathBuf::from("/projects/hearth");
+        let classify = PathBuf::from("/projects/classifyhq");
+
+        write_active_project_at(&file, "sess-old", Some(&hearth), 1_000);
+        write_active_project_at(&file, "sess-new", Some(&classify), 1_100);
+
+        let got = read_active_project_at(&file, 1_100);
+        assert_eq!(got, Some(classify));
+    }
+
+    #[test]
+    fn active_project_expires_past_ttl() {
+        let dir = tmpdir();
+        let file = dir.join("active.json");
+        let hearth = PathBuf::from("/projects/hearth");
+        write_active_project_at(&file, "sess-1", Some(&hearth), 1_000);
+
+        // Read well past the TTL window
+        let got = read_active_project_at(&file, 1_000 + ACTIVE_PROJECT_TTL_SECS + 1);
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn active_project_none_clears_for_session() {
+        let dir = tmpdir();
+        let file = dir.join("active.json");
+        let hearth = PathBuf::from("/projects/hearth");
+
+        write_active_project_at(&file, "sess-1", Some(&hearth), 1_000);
+        write_active_project_at(&file, "sess-1", None, 1_050);
+
+        let got = read_active_project_at(&file, 1_050);
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn active_project_read_handles_missing_file() {
+        let dir = tmpdir();
+        let missing = dir.join("nope.json");
+        assert!(read_active_project_at(&missing, 1_000).is_none());
+    }
+
+    #[test]
+    fn active_project_write_ignores_empty_session_id() {
+        let dir = tmpdir();
+        let file = dir.join("active.json");
+        let hearth = PathBuf::from("/projects/hearth");
+        write_active_project_at(&file, "", Some(&hearth), 1_000);
+        assert!(!file.exists());
     }
 
     fn make_tool_use_line(tool: &str, file_path: &str) -> String {

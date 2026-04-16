@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Memory,
   Topic,
@@ -9,6 +10,7 @@ import type {
   HookStatus,
   SetupResult,
   OrganizerReport,
+  OrganizerProgress,
 } from "@/types";
 import { useTauri } from "@/composables/useTauri";
 
@@ -32,12 +34,14 @@ export const useAppStore = defineStore("app", () => {
   const searching = ref(false);
   const settingUp = ref(false);
   const organizing = ref(false);
-  const autoOrganize = ref(true);
+  const organizeProgress = ref<OrganizerProgress | null>(null);
+  const autoOrganize = ref(false);
   const lastOrganizeReport = ref<OrganizerReport | null>(null);
   const error = ref<string | null>(null);
 
   // Polling for external changes (e.g. MCP server adding memories)
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let progressUnlisten: UnlistenFn | null = null;
   const lastKnownCount = ref(0);
 
   // Computed
@@ -177,20 +181,29 @@ export const useAppStore = defineStore("app", () => {
   async function runOrganize() {
     if (organizing.value) return;
     organizing.value = true;
+    organizeProgress.value = {
+      phase: "starting",
+      message: "Starting organizer",
+      current: 0,
+      total: 0,
+    };
     error.value = null;
     try {
       lastOrganizeReport.value = await tauri.runOrganizePass();
+      await loadStatus();
       await loadTopics();
     } catch (e) {
       error.value = String(e);
     } finally {
       organizing.value = false;
+      organizeProgress.value = null;
     }
   }
 
   async function undoLast() {
     try {
       await tauri.undoLastOrganize();
+      await loadStatus();
       await loadTopics();
     } catch (e) {
       error.value = String(e);
@@ -241,21 +254,30 @@ export const useAppStore = defineStore("app", () => {
       clearInterval(pollTimer);
       pollTimer = null;
     }
+    if (progressUnlisten) {
+      progressUnlisten();
+      progressUnlisten = null;
+    }
+  }
+
+  async function startProgressListener() {
+    if (progressUnlisten) return;
+    progressUnlisten = await listen<OrganizerProgress>(
+      "organizer:progress",
+      (event) => {
+        organizeProgress.value = event.payload;
+      },
+    );
   }
 
   async function initialize() {
     await loadStatus();
     await loadAutoOrganize();
+    await startProgressListener();
     if (!needsSetup.value) {
       lastKnownCount.value = totalMemories.value;
       await loadTopics();
       startPolling();
-      // Auto-run organizer in background if enabled.
-      // Use setTimeout so the UI renders topics first before the organizer
-      // grabs the DB lock for a potentially long pass.
-      if (autoOrganize.value && totalMemories.value > 0) {
-        setTimeout(() => runOrganize(), 100);
-      }
     }
   }
 
@@ -275,6 +297,7 @@ export const useAppStore = defineStore("app", () => {
     searching,
     settingUp,
     organizing,
+    organizeProgress,
     error,
     // computed
     totalMemories,

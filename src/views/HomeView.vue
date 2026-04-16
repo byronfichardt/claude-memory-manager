@@ -2,7 +2,11 @@
 import { computed, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { useAppStore } from "@/stores/app";
-import type { Topic } from "@/types";
+import {
+  ERR_NO_CLAUDE_INSTALL,
+  ERR_NO_CLAUDE_CLI,
+  type Topic,
+} from "@/types";
 
 const router = useRouter();
 const app = useAppStore();
@@ -12,6 +16,32 @@ onMounted(() => {
     app.loadTopics();
   }
 });
+
+const claudeCodeMissing = computed(
+  () => app.bootstrap && !app.bootstrap.claude_code_installed,
+);
+const claudeCliMissing = computed(
+  () =>
+    app.bootstrap &&
+    app.bootstrap.claude_code_installed &&
+    !app.bootstrap.claude_cli_available,
+);
+const startupErrors = computed(() => app.bootstrap?.startup_errors ?? []);
+
+const errorDisplay = computed(() => {
+  const err = app.error ?? "";
+  if (err.includes(ERR_NO_CLAUDE_INSTALL)) {
+    return "Claude Code is not installed. Install it from https://claude.com/claude-code, then reopen this app.";
+  }
+  if (err.includes(ERR_NO_CLAUDE_CLI)) {
+    return "The `claude` CLI was not found on your PATH. Install Claude Code, then reopen this app.";
+  }
+  return err;
+});
+
+async function refreshStatus() {
+  await app.loadStatus();
+}
 
 const sortedTopics = computed(() =>
   [...app.topics].sort((a, b) => b.memory_count - a.memory_count),
@@ -77,8 +107,77 @@ async function organizeNow() {
       </div>
     </div>
 
+    <!-- Organizer progress -->
+    <div v-if="app.organizing" class="organize-banner">
+      <span class="organize-spinner" aria-hidden="true"></span>
+      <div class="organize-body">
+        <div class="organize-title">
+          {{ app.organizeProgress?.message ?? "Organizing memories…" }}
+        </div>
+        <div
+          v-if="app.organizeProgress && app.organizeProgress.total > 0"
+          class="organize-meta"
+        >
+          {{ app.organizeProgress.phase }} · step
+          {{ app.organizeProgress.current + 1 }} of
+          {{ app.organizeProgress.total }}
+        </div>
+        <div
+          v-else-if="app.organizeProgress"
+          class="organize-meta"
+        >
+          {{ app.organizeProgress.phase }}
+        </div>
+      </div>
+    </div>
+
+    <!-- Startup errors (directory creation, DB init) -->
+    <div v-if="startupErrors.length > 0" class="blocking-card warn">
+      <h2 class="blocking-title">Startup issues</h2>
+      <ul class="blocking-list">
+        <li v-for="(msg, i) in startupErrors" :key="i">{{ msg }}</li>
+      </ul>
+      <p class="blocking-hint">
+        See <code>~/.claude-memory-manager/startup.log</code> for details.
+      </p>
+    </div>
+
+    <!-- Blocking state: Claude Code not installed -->
+    <div v-if="claudeCodeMissing" class="blocking-card">
+      <h2 class="blocking-title">Install Claude Code first</h2>
+      <p class="blocking-lead">
+        No <code>~/.claude*</code> directory was found on this machine. This
+        app augments Claude Code with a persistent memory system, so Claude
+        Code needs to be installed before we can do anything.
+      </p>
+      <p class="blocking-lead">
+        Install it from
+        <a href="https://claude.com/claude-code" target="_blank" rel="noopener">claude.com/claude-code</a>,
+        run it once so it creates <code>~/.claude</code>, then reopen this app.
+      </p>
+      <button class="primary-btn sm" @click="refreshStatus">Re-check</button>
+    </div>
+
+    <!-- Blocking state: claude CLI not on PATH -->
+    <div v-else-if="claudeCliMissing" class="blocking-card">
+      <h2 class="blocking-title">Claude CLI not on PATH</h2>
+      <p class="blocking-lead">
+        We found your Claude Code config directory, but running
+        <code>claude --version</code> failed. We need the <code>claude</code>
+        binary to be on <code>PATH</code> so we can register the memory MCP
+        server.
+      </p>
+      <p class="blocking-lead">
+        Make sure Claude Code is installed and that launching a shell gives
+        you a working <code>claude</code> command. If you installed via an app
+        bundle, you may need to reopen this Memory Manager app from a
+        terminal that has Claude on <code>PATH</code>.
+      </p>
+      <button class="primary-btn sm" @click="refreshStatus">Re-check</button>
+    </div>
+
     <!-- First-time setup -->
-    <div v-if="app.needsSetup" class="setup-card">
+    <div v-else-if="app.needsSetup" class="setup-card">
       <div class="setup-icon">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
           <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
@@ -159,7 +258,7 @@ async function organizeNow() {
 
     <!-- MCP registration prompt (only if setup is done but MCP isn't) -->
     <div
-      v-else-if="app.needsMcpRegistration"
+      v-else-if="app.needsMcpRegistration && !claudeCodeMissing && !claudeCliMissing"
       class="action-card"
     >
       <div class="action-head">
@@ -172,7 +271,10 @@ async function organizeNow() {
     </div>
 
     <!-- Topics grid -->
-    <div v-if="!app.needsSetup" class="topics-section">
+    <div
+      v-if="!app.needsSetup && !claudeCodeMissing && !claudeCliMissing"
+      class="topics-section"
+    >
       <div class="section-head">
         <h2 class="section-title">Topics</h2>
         <div class="section-actions">
@@ -231,7 +333,7 @@ async function organizeNow() {
       </div>
     </div>
 
-    <div v-if="app.error" class="error">{{ app.error }}</div>
+    <div v-if="errorDisplay" class="error">{{ errorDisplay }}</div>
   </div>
 </template>
 
@@ -267,6 +369,44 @@ async function organizeNow() {
 }
 .status-text {
   letter-spacing: 0.01em;
+}
+
+.organize-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.875rem;
+  padding: 0.875rem 1rem;
+  margin-bottom: 1.25rem;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 35%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 10%, var(--color-surface-alt));
+  border-radius: 0.625rem;
+}
+.organize-spinner {
+  width: 0.875rem;
+  height: 0.875rem;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--color-accent) 30%, transparent);
+  border-top-color: var(--color-accent);
+  animation: organize-spin 0.9s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes organize-spin {
+  to { transform: rotate(360deg); }
+}
+.organize-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  min-width: 0;
+}
+.organize-title {
+  font-size: 0.875rem;
+  color: var(--color-text);
+}
+.organize-meta {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  text-transform: lowercase;
 }
 
 /* Setup card */
@@ -362,6 +502,54 @@ async function organizeNow() {
   font-size: 0.75rem;
   color: var(--color-health-ok);
   margin: 1rem 0 0;
+}
+
+/* Blocking card (no-install / no-cli / startup errors) */
+.blocking-card {
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-alt);
+  border-radius: 0.75rem;
+  padding: 1.75rem 1.75rem;
+  max-width: 40rem;
+  margin: 2rem auto;
+}
+.blocking-card.warn {
+  border-color: var(--color-health-warning);
+}
+.blocking-title {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0 0 0.75rem;
+  letter-spacing: -0.01em;
+}
+.blocking-lead {
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+  line-height: 1.55;
+  margin: 0 0 0.875rem;
+}
+.blocking-list {
+  margin: 0 0 0.875rem;
+  padding-left: 1.25rem;
+  font-size: 0.8125rem;
+  color: var(--color-text-secondary);
+  line-height: 1.55;
+}
+.blocking-hint {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  margin: 0 0 0.875rem;
+}
+.blocking-card code,
+.blocking-card a {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.8125rem;
+  color: var(--color-accent);
+}
+.blocking-card a {
+  font-family: inherit;
+  text-decoration: underline;
 }
 
 /* Action card */

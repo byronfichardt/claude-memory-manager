@@ -2,13 +2,133 @@
 import { ref, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { useAppStore } from "@/stores/app";
+import { useTauri } from "@/composables/useTauri";
 import { getVersion } from "@tauri-apps/api/app";
+import { save, open } from "@tauri-apps/plugin-dialog";
+import type {
+  UninstallReport,
+  ExportSummary,
+  ImportReport,
+  ImportMode,
+} from "@/types";
 
 const router = useRouter();
 const app = useAppStore();
+const tauri = useTauri();
 
 const working = ref(false);
 const appVersion = ref("...");
+
+// Two-stage confirm for the Danger Zone
+const uninstallArmed = ref(false);
+const uninstalling = ref(false);
+const uninstallReport = ref<UninstallReport | null>(null);
+const uninstallError = ref<string | null>(null);
+let armTimer: ReturnType<typeof setTimeout> | null = null;
+
+function armUninstall() {
+  uninstallArmed.value = true;
+  if (armTimer) clearTimeout(armTimer);
+  armTimer = setTimeout(() => {
+    uninstallArmed.value = false;
+  }, 5000);
+}
+
+async function confirmUninstall() {
+  uninstallArmed.value = false;
+  uninstalling.value = true;
+  uninstallError.value = null;
+  try {
+    uninstallReport.value = await tauri.uninstallEverything();
+  } catch (e) {
+    uninstallError.value = String(e);
+  } finally {
+    uninstalling.value = false;
+  }
+}
+
+function cancelUninstall() {
+  uninstallArmed.value = false;
+  if (armTimer) {
+    clearTimeout(armTimer);
+    armTimer = null;
+  }
+}
+
+// Export / import
+const exporting = ref(false);
+const importing = ref(false);
+const lastExport = ref<ExportSummary | null>(null);
+const lastImport = ref<ImportReport | null>(null);
+const portableError = ref<string | null>(null);
+const importMode = ref<ImportMode>("merge");
+
+function defaultExportName(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `claude-memories-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.json`;
+}
+
+async function exportMemories() {
+  portableError.value = null;
+  let path: string | null;
+  try {
+    path = await save({
+      title: "Back up memories",
+      defaultPath: defaultExportName(),
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+  } catch (e) {
+    portableError.value = `Dialog failed: ${e}`;
+    return;
+  }
+  if (!path) return; // user cancelled
+
+  exporting.value = true;
+  try {
+    lastExport.value = await tauri.exportMemories(path);
+  } catch (e) {
+    portableError.value = String(e);
+  } finally {
+    exporting.value = false;
+  }
+}
+
+async function importMemories() {
+  portableError.value = null;
+  let picked: string | string[] | null;
+  try {
+    picked = await open({
+      title: "Import memories from JSON",
+      multiple: false,
+      directory: false,
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+  } catch (e) {
+    portableError.value = `Dialog failed: ${e}`;
+    return;
+  }
+  if (!picked) return;
+  const path = Array.isArray(picked) ? picked[0] : picked;
+
+  if (importMode.value === "replace") {
+    const confirmed = confirm(
+      "Replace mode deletes ALL current memories before importing. This cannot be undone. Continue?",
+    );
+    if (!confirmed) return;
+  }
+
+  importing.value = true;
+  try {
+    lastImport.value = await tauri.importMemories(path, importMode.value);
+    // Refresh the app's memory count
+    await app.loadStatus();
+  } catch (e) {
+    portableError.value = String(e);
+  } finally {
+    importing.value = false;
+  }
+}
 
 getVersion().then((v) => (appVersion.value = v));
 
@@ -251,6 +371,75 @@ function goHome() {
           </details>
         </div>
       </div>
+
+      <!-- Back up / restore -->
+      <div class="card">
+        <div class="row">
+          <div>
+            <div class="label">Back up memories</div>
+            <div class="sub">
+              Save a JSON bundle of all topics, memories, and edges. Useful
+              before a reinstall or to move memories to another machine.
+            </div>
+          </div>
+          <button
+            class="ghost-btn sm"
+            :disabled="exporting"
+            @click="exportMemories"
+          >
+            {{ exporting ? "Exporting..." : "Export JSON..." }}
+          </button>
+        </div>
+        <div v-if="lastExport" class="sub report">
+          ✓ Exported {{ lastExport.memory_count }} memor{{ lastExport.memory_count === 1 ? "y" : "ies" }}
+          ({{ Math.round(lastExport.bytes_written / 1024) }} KB)
+          to <code>{{ lastExport.path }}</code>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <div>
+            <div class="label">Import memories</div>
+            <div class="sub">
+              Restore a JSON bundle. <strong>Merge</strong> skips duplicates
+              (safe re-import); <strong>Replace</strong> wipes everything
+              first.
+            </div>
+          </div>
+          <div class="button-group">
+            <select v-model="importMode" class="import-mode-select" :disabled="importing">
+              <option value="merge">Merge</option>
+              <option value="replace">Replace</option>
+            </select>
+            <button
+              class="ghost-btn sm"
+              :disabled="importing"
+              @click="importMemories"
+            >
+              {{ importing ? "Importing..." : "Import JSON..." }}
+            </button>
+          </div>
+        </div>
+        <div v-if="lastImport" class="sub report">
+          ✓ Added {{ lastImport.memories_added }} memor{{ lastImport.memories_added === 1 ? "y" : "ies" }},
+          skipped {{ lastImport.memories_skipped }} duplicate{{ lastImport.memories_skipped === 1 ? "" : "s" }},
+          topics +{{ lastImport.topics_added }},
+          edges +{{ lastImport.edges_added }}<span v-if="lastImport.edges_skipped"> ({{ lastImport.edges_skipped }} skipped)</span>.
+        </div>
+        <div v-if="lastImport?.errors?.length" class="errors">
+          <details>
+            <summary>{{ lastImport.errors.length }} error{{ lastImport.errors.length === 1 ? "" : "s" }}</summary>
+            <ul>
+              <li v-for="(err, i) in lastImport.errors" :key="i">{{ err }}</li>
+            </ul>
+          </details>
+        </div>
+      </div>
+
+      <div v-if="portableError" class="error inline-error">
+        {{ portableError }}
+      </div>
     </section>
 
     <!-- Organization -->
@@ -304,6 +493,84 @@ function goHome() {
               {{ app.organizing ? "Running..." : "Organize" }}
             </button>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Danger zone -->
+    <section class="section">
+      <h2 class="section-title danger-section-title">Danger zone</h2>
+      <div class="card danger-card">
+        <div v-if="!uninstallReport" class="row">
+          <div>
+            <div class="label">Uninstall cleanly</div>
+            <div class="sub">
+              macOS doesn't run any code when you drag the app to Trash, so
+              bootstrap artifacts (CLAUDE.md section, settings.json hook, MCP
+              registration, <code>~/.claude-memory-manager/</code>) would be
+              left behind. Click this before moving the app to Trash to tear
+              everything down. <strong>All memories will be deleted.</strong>
+            </div>
+          </div>
+          <div class="button-group">
+            <template v-if="!uninstallArmed">
+              <button
+                class="ghost-btn sm danger-btn"
+                :disabled="uninstalling"
+                @click="armUninstall"
+              >
+                Uninstall...
+              </button>
+            </template>
+            <template v-else>
+              <button
+                class="ghost-btn sm"
+                :disabled="uninstalling"
+                @click="cancelUninstall"
+              >
+                Cancel
+              </button>
+              <button
+                class="primary-btn sm danger-primary"
+                :disabled="uninstalling"
+                @click="confirmUninstall"
+              >
+                {{ uninstalling ? "Uninstalling..." : "Yes, delete everything" }}
+              </button>
+            </template>
+          </div>
+        </div>
+
+        <div v-else class="uninstall-result">
+          <div class="label">
+            <span v-if="uninstallReport.data_dir_removed && uninstallReport.steps.every((s) => s.success)" class="ok">
+              ✓ Uninstalled cleanly
+            </span>
+            <span v-else class="warn">
+              Uninstall completed with warnings
+            </span>
+          </div>
+          <div class="sub">
+            You can now quit this app and drag
+            <code>Claude Memory Manager.app</code> to the Trash.
+            {{ uninstallReport.data_dir_removed ? "Data directory removed." : `Data directory still at ${uninstallReport.data_dir_path}.` }}
+          </div>
+          <ul class="uninstall-steps">
+            <li
+              v-for="(step, i) in uninstallReport.steps"
+              :key="i"
+              :class="{ ok: step.success, warn: !step.success }"
+            >
+              <span v-if="step.success">✓</span>
+              <span v-else>✗</span>
+              {{ step.label }}
+              <span v-if="step.error" class="step-error">— {{ step.error }}</span>
+            </li>
+          </ul>
+        </div>
+
+        <div v-if="uninstallError" class="error inline-error">
+          {{ uninstallError }}
         </div>
       </div>
     </section>
@@ -574,5 +841,84 @@ function goHome() {
 .toggle.is-on .toggle-knob {
   transform: translateX(1.125rem);
   background: var(--color-surface);
+}
+
+.danger-section-title {
+  color: var(--color-health-error);
+}
+.danger-card {
+  border-color: color-mix(in srgb, var(--color-health-error) 40%, var(--color-border));
+}
+.danger-card .sub code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.625rem;
+  padding: 0 0.25rem;
+  color: var(--color-text-primary);
+}
+.danger-btn {
+  color: var(--color-health-error);
+  border-color: color-mix(in srgb, var(--color-health-error) 40%, var(--color-border));
+}
+.danger-btn:hover:not(:disabled) {
+  color: var(--color-health-error);
+  border-color: var(--color-health-error);
+}
+.danger-primary {
+  background: var(--color-health-error);
+  color: var(--color-surface);
+}
+.danger-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-health-error) 85%, black);
+}
+
+.uninstall-result {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.uninstall-steps {
+  margin: 0.25rem 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.6875rem;
+}
+.uninstall-steps li.ok {
+  color: var(--color-health-ok);
+}
+.uninstall-steps li.warn {
+  color: var(--color-health-warning);
+}
+.uninstall-steps .step-error {
+  color: var(--color-text-muted);
+  margin-left: 0.25rem;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.625rem;
+}
+.inline-error {
+  margin-top: 0.75rem;
+}
+
+.import-mode-select {
+  padding: 0.375rem 0.5rem;
+  font-size: 0.6875rem;
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border);
+  border-radius: 0.375rem;
+  cursor: pointer;
+}
+.import-mode-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sub.report code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.625rem;
+  word-break: break-all;
+  color: var(--color-accent);
 }
 </style>

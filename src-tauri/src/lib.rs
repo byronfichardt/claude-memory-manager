@@ -26,6 +26,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::autopilot::get_bootstrap_status,
+            commands::autopilot::get_startup_errors,
             commands::autopilot::run_first_time_setup,
             commands::autopilot::store_list_memories,
             commands::autopilot::store_list_memories_by_topic,
@@ -51,6 +52,9 @@ pub fn run() {
             commands::autopilot::uninstall_hook,
             commands::autopilot::get_related_memories,
             commands::autopilot::store_memory_count,
+            commands::autopilot::uninstall_everything,
+            commands::autopilot::export_memories,
+            commands::autopilot::import_memories,
         ])
         .setup(|app| {
             // On macOS, set as accessory app so it doesn't appear in the Dock
@@ -106,6 +110,13 @@ pub fn run() {
                     }
                 });
             }
+
+            // Kick off first-run auto-bootstrap on a background thread so it
+            // doesn't block the tray/window init. Idempotent via a marker
+            // file at <data_dir>/first-run.json.
+            std::thread::spawn(|| {
+                services::installer::maybe_auto_bootstrap();
+            });
 
             Ok(())
         })

@@ -19,12 +19,22 @@ const SERVER_NAME: &str = "claude-memory-manager";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Resolved at MCP server startup — the git root of whatever directory Claude Code
-/// spawned the server from, if any. Used as a fallback "current project" when
-/// Claude doesn't pass an explicit `project` param.
+/// spawned the server from, if any. Fallback for when the hook hasn't written a
+/// fresh pointer (e.g. programmatic MCP clients that don't run a UserPromptSubmit
+/// hook).
 static SERVER_PROJECT: OnceLock<Option<PathBuf>> = OnceLock::new();
 
-fn server_project() -> Option<&'static Path> {
-    SERVER_PROJECT.get().and_then(|o| o.as_deref())
+/// Best guess at the project the user is currently working on.
+/// Priority:
+///   1. Active-project pointer written by the UserPromptSubmit hook — this is
+///      the most accurate signal because the hook has transcript access.
+///   2. The git root of wherever the MCP server was spawned from (startup cwd).
+///   3. None.
+fn detected_project() -> Option<PathBuf> {
+    if let Some(p) = project::read_active_project() {
+        return Some(p);
+    }
+    SERVER_PROJECT.get().and_then(|o| o.clone())
 }
 
 #[derive(Deserialize)]
@@ -181,7 +191,7 @@ fn handle_tools_list() -> Value {
                         },
                         "project": {
                             "type": "string",
-                            "description": "Optional: absolute git-root path of the project you're working on, or \"global\" for a cross-project search. Boosts same-project memories and slightly demotes others. If omitted, uses the directory the MCP server was spawned from."
+                            "description": "Optional: absolute git-root path of the project you're working on, or \"global\" for a cross-project search. Boosts same-project memories and slightly demotes others. If omitted, uses the project detected by the UserPromptSubmit hook (transcript-inferred), falling back to the directory the MCP server was spawned from."
                         }
                     },
                     "required": ["query"]
@@ -216,7 +226,7 @@ fn handle_tools_list() -> Value {
                         },
                         "project": {
                             "type": "string",
-                            "description": "Optional scope override. \"global\" forces a global memory. An absolute git-root path scopes it to that project (e.g. /Users/byron/projects/personal/hearth). If omitted: type=user is always global; type=feedback/reference default global; type=project defaults to the git root of the directory the MCP server was spawned from."
+                            "description": "Optional scope override. \"global\" forces a global memory. An absolute git-root path scopes it to that project (e.g. /Users/byron/projects/personal/hearth). If omitted: type=user is always global; type=feedback/reference default global; type=project defaults to the project detected by the UserPromptSubmit hook (transcript-inferred), falling back to the server's startup cwd."
                         }
                     },
                     "required": ["title", "content"]
@@ -313,13 +323,11 @@ fn tool_memory_search(args: Value) -> Result<String, String> {
     let limit = args.get("limit").and_then(Value::as_u64).map(|n| n as u32);
     let explicit_project = args.get("project").and_then(Value::as_str);
 
-    // Resolve current project: explicit > server startup > None.
-    // `current_project` owns a PathBuf when explicit, else borrows from the
-    // static server project. Using PathBuf throughout avoids lifetime issues.
+    // Resolve current project: explicit > hook pointer > server startup > None.
     let current_project: Option<PathBuf> = match explicit_project {
         Some(p) if p.trim().eq_ignore_ascii_case("global") => None,
         Some(p) if !p.trim().is_empty() => Some(PathBuf::from(p.trim())),
-        _ => server_project().map(|p| p.to_path_buf()),
+        _ => detected_project(),
     };
     let current_project_ref: Option<&Path> = current_project.as_deref();
 
@@ -338,7 +346,7 @@ fn tool_memory_search(args: Value) -> Result<String, String> {
         .enumerate()
         .map(|(i, h)| {
             let bm25_rank_norm = 1.0 - (i as f64 / n.max(1.0)); // top hit = 1.0, bottom ~ 0
-            let aff = project_affinity(h.project.as_deref(), current_project_ref);
+            let aff = project::project_affinity(h.project.as_deref(), current_project_ref);
             (i, bm25_rank_norm + aff)
         })
         .collect();
@@ -380,28 +388,6 @@ fn short_project(path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
-// Project affinity scoring — kept in sync with hook.rs values.
-const MCP_PROJECT_AFFINITY_EXACT: f64 = 0.40;
-const MCP_PROJECT_AFFINITY_SHARED_PARENT: f64 = 0.15;
-const MCP_PROJECT_AFFINITY_UNRELATED: f64 = -0.20;
-
-fn project_affinity(memory_project: Option<&str>, current: Option<&Path>) -> f64 {
-    match (memory_project, current) {
-        (_, None) => 0.0,
-        (None, Some(_)) => 0.0,
-        (Some(mp), Some(cp)) => {
-            let mp_path = Path::new(mp);
-            if mp_path == cp {
-                MCP_PROJECT_AFFINITY_EXACT
-            } else if project::shared_parent(mp_path, cp) {
-                MCP_PROJECT_AFFINITY_SHARED_PARENT
-            } else {
-                MCP_PROJECT_AFFINITY_UNRELATED
-            }
-        }
-    }
-}
-
 fn tool_memory_add(args: Value) -> Result<String, String> {
     let title = args
         .get("title")
@@ -431,11 +417,13 @@ fn tool_memory_add(args: Value) -> Result<String, String> {
         .and_then(Value::as_str);
 
     // Resolve scope: user type is forced global; explicit override wins;
-    // otherwise type-driven default with server's startup project as the source.
+    // otherwise type-driven default with the hook-detected project (or server
+    // startup cwd as fallback) as the source.
+    let detected = detected_project();
     let project = project::resolve_memory_scope(
         memory_type.as_deref(),
         explicit_project,
-        server_project(),
+        detected.as_deref(),
     );
 
     let memory = memories::insert(memories::NewMemory {
