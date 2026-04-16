@@ -88,6 +88,9 @@ export function useTauri() {
     getAutoOrganize: () => invoke<boolean>("get_auto_organize"),
     setAutoOrganize: (enabled: boolean) =>
       invoke<void>("set_auto_organize", { enabled }),
+    getSplitThreshold: () => invoke<number>("get_split_threshold"),
+    setSplitThreshold: (threshold: number) =>
+      invoke<void>("set_split_threshold", { threshold }),
 
     // Uninstall
     uninstallEverything: () => invoke<UninstallReport>("uninstall_everything"),

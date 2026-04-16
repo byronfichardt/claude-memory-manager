@@ -34,6 +34,8 @@ fn emit(handle: Option<&AppHandle>, phase: &'static str, message: impl Into<Stri
 
 const SETTING_LAST_ORGANIZE_TS: &str = "last_organize_ts";
 const SETTING_INITIAL_RELATE_DONE: &str = "initial_relate_done";
+pub const SETTING_SPLIT_THRESHOLD: &str = "split_threshold";
+const SETTING_SPLIT_LAST_SIZE_PREFIX: &str = "split_last_size:";
 
 const CLASSIFY_BATCH_SIZE: usize = 25;
 const CLASSIFY_MAX_CONTENT: usize = 300;
@@ -42,6 +44,11 @@ const DEDUP_MIN_TOPIC_SIZE: usize = 2;
 const CONSOLIDATE_SAMPLE_PER_TOPIC: usize = 6;
 const RELATE_BATCH_SIZE: usize = 20;
 const RELATE_MAX_CONTENT: usize = 400;
+pub const SPLIT_DEFAULT_THRESHOLD: usize = 15;
+pub const SPLIT_THRESHOLD_MIN: usize = 5;
+const SPLIT_MIN_SUB_TOPIC_SIZE: usize = 3;
+const SPLIT_GROWTH_RATIO: f64 = 1.3;
+const SPLIT_MAX_CONTENT: usize = 300;
 
 const CLASSIFY_SYSTEM: &str = r#"You classify memories from a knowledge base into topics.
 
@@ -99,6 +106,29 @@ Rules:
 Respond with ONLY valid JSON (no prose, no markdown fences):
 {"edges": [{"source_id": "id1", "target_id": "id2", "edge_type": "relates-to"}]}"#;
 
+const SPLIT_SYSTEM: &str = r#"You evaluate whether a topic bucket has grown too broad and should be split into narrower sub-topics.
+
+You are shown one topic and all memories currently classified under it. Decide whether the memories form two or more coherent sub-groups that deserve their own topics.
+
+SPLIT when:
+1. The memories clearly cluster into 2+ distinct themes (e.g. a "deployment" bucket that holds both "kubernetes" and "kamal" content).
+2. Each candidate sub-group has at least 3 members with meaningfully different focus from the others.
+3. The new sub-topic names would be as reusable as a normal top-level topic (short, functional, not project-specific).
+
+DO NOT SPLIT when:
+1. The memories all share one coherent theme, even if the bucket is large.
+2. A proposed sub-group would have fewer than 3 members.
+3. The split would just create a project-name topic (e.g. "hearth-deployment") — project-specific buckets are explicitly discouraged.
+4. You're uncertain. A large coherent topic is better than a bad split.
+
+When splitting, you may leave some members in the original topic by naming it as one of the sub-topics. Every member_id you list must currently be in the topic being evaluated.
+
+Respond with ONLY valid JSON (no prose, no markdown fences). If no split is warranted:
+{"split": false, "reason": "brief justification"}
+
+If splitting:
+{"split": true, "sub_topics": [{"name": "topic-a", "member_ids": ["id1", "id2", "id3"], "reason": "brief"}, {"name": "topic-b", "member_ids": ["id4", "id5", "id6"], "reason": "brief"}]}"#;
+
 const DEDUP_SYSTEM: &str = r#"You identify groups of memories that are near-duplicates — different phrasings of the same information, or memories that overlap enough that merging would lose nothing.
 
 Rules:
@@ -117,6 +147,7 @@ pub struct OrganizerReport {
     pub merged_count: usize,
     pub edges_created: usize,
     pub consolidated_topics: Vec<String>,
+    pub split_topics: Vec<String>,
     pub errors: Vec<String>,
 }
 
@@ -173,6 +204,24 @@ struct Merge {
     merged_content: String,
 }
 
+#[derive(Deserialize)]
+struct AiSplitResponse {
+    #[serde(default)]
+    split: bool,
+    #[serde(default)]
+    sub_topics: Vec<SplitSubTopic>,
+    #[serde(default)]
+    reason: String,
+}
+
+#[derive(Deserialize, Clone)]
+struct SplitSubTopic {
+    name: String,
+    member_ids: Vec<String>,
+    #[serde(default)]
+    reason: String,
+}
+
 /// Run a full organization pass: classify untopiced memories, dedup within topics,
 /// then consolidate overlapping topics.
 ///
@@ -227,6 +276,13 @@ pub async fn run_full_pass(handle: Option<AppHandle>) -> Result<OrganizerReport,
             Ok(()) => {}
             Err(e) => report.errors.push(format!("consolidate: {}", e)),
         }
+    }
+
+    // Phase 4: split oversized topics. Runs every pass — the per-topic
+    // growth guard keeps cost bounded when nothing has changed meaningfully.
+    match split_oversized_topics(h, &client, &mut report).await {
+        Ok(()) => {}
+        Err(e) => report.errors.push(format!("split: {}", e)),
     }
 
     let _ = settings::set(SETTING_LAST_ORGANIZE_TS, &now_ts.to_string());
@@ -363,6 +419,249 @@ fn apply_topic_merge(merge: &TopicMerge) -> Result<usize, String> {
     }
 
     Ok(moved_count)
+}
+
+/// Split oversized topics (Phase 4). For each topic whose size exceeds the
+/// configured threshold AND has grown meaningfully since the last evaluation,
+/// ask the AI whether to split into narrower sub-topics and apply the result.
+///
+/// Growth guard: per-topic `split_last_size:<topic>` is stored after each
+/// evaluation. A topic is only re-asked once its size reaches `last * 1.3`,
+/// so cost stays bounded across recurring passes.
+pub async fn split_oversized_topics(
+    handle: Option<&AppHandle>,
+    client: &ClaudeClient,
+    report: &mut OrganizerReport,
+) -> Result<(), String> {
+    let threshold = load_split_threshold();
+    let all_topics = topics::list_all()?;
+
+    let candidates: Vec<&topics::Topic> = all_topics
+        .iter()
+        .filter(|t| (t.memory_count as usize) >= threshold)
+        .filter(|t| should_reevaluate_split(&t.name, t.memory_count as usize))
+        .collect();
+
+    if candidates.is_empty() {
+        return Ok(());
+    }
+
+    let total = candidates.len();
+    for (i, topic) in candidates.iter().enumerate() {
+        emit(
+            handle,
+            "split",
+            format!("Evaluating split for '{}'", topic.name),
+            i,
+            total,
+        );
+
+        let mems = memories::list_by_topic(&topic.name)?;
+        match evaluate_split(client, &topic.name, &mems).await {
+            Ok(Some(response)) => match apply_split(&topic.name, &mems, &response) {
+                Ok(Some(summary)) => report.split_topics.push(summary),
+                Ok(None) => {}
+                Err(e) => report
+                    .errors
+                    .push(format!("apply split {}: {}", topic.name, e)),
+            },
+            Ok(None) => {}
+            Err(e) => report
+                .errors
+                .push(format!("evaluate split {}: {}", topic.name, e)),
+        }
+
+        // Record the size we evaluated at, so we don't re-ask until the topic
+        // grows past the growth ratio. Applies whether we split or not.
+        record_split_size(&topic.name, mems.len());
+    }
+
+    Ok(())
+}
+
+fn load_split_threshold() -> usize {
+    settings::get(SETTING_SPLIT_THRESHOLD, &SPLIT_DEFAULT_THRESHOLD.to_string())
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(SPLIT_DEFAULT_THRESHOLD)
+}
+
+fn should_reevaluate_split(topic: &str, current_size: usize) -> bool {
+    let key = format!("{}{}", SETTING_SPLIT_LAST_SIZE_PREFIX, topic);
+    let last: usize = settings::get(&key, "0")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    if last == 0 {
+        return true;
+    }
+    current_size as f64 >= (last as f64) * SPLIT_GROWTH_RATIO
+}
+
+fn record_split_size(topic: &str, size: usize) {
+    let key = format!("{}{}", SETTING_SPLIT_LAST_SIZE_PREFIX, topic);
+    let _ = settings::set(&key, &size.to_string());
+}
+
+async fn evaluate_split(
+    client: &ClaudeClient,
+    topic: &str,
+    mems: &[memories::Memory],
+) -> Result<Option<AiSplitResponse>, String> {
+    let mut prompt = String::new();
+    prompt.push_str(&format!(
+        "Topic: {} ({} memories)\n\n",
+        topic,
+        mems.len()
+    ));
+    prompt.push_str("Members:\n\n");
+    for m in mems {
+        prompt.push_str(&format!("[id={}]\n", m.id));
+        prompt.push_str(&format!("title: {}\n", m.title));
+        if !m.description.is_empty() {
+            prompt.push_str(&format!("description: {}\n", m.description));
+        }
+        let content_preview = truncate(&m.content, SPLIT_MAX_CONTENT);
+        prompt.push_str(&format!("content: {}\n\n", content_preview));
+    }
+
+    let response = client.analyze(SPLIT_SYSTEM, &prompt).await?;
+    let json = extract_json(&response.text);
+    let parsed: AiSplitResponse = serde_json::from_str(json)
+        .map_err(|e| format!("parse split response: {} (raw: {})", e, truncate(json, 300)))?;
+
+    if !parsed.split || parsed.sub_topics.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(parsed))
+}
+
+/// Validate and apply a split. Returns Some(summary) on success, None if the
+/// AI's split was rejected during validation (treated as a no-op, not an error).
+fn apply_split(
+    original_topic: &str,
+    current_members: &[memories::Memory],
+    response: &AiSplitResponse,
+) -> Result<Option<String>, String> {
+    let member_ids: std::collections::HashSet<&str> =
+        current_members.iter().map(|m| m.id.as_str()).collect();
+
+    // Normalize and validate sub-topic shape before touching any data.
+    let mut normalized: Vec<(String, Vec<String>, String)> = Vec::new();
+    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen_members: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for sub in &response.sub_topics {
+        let name = normalize_topic(&sub.name);
+        if name.is_empty() {
+            return Ok(None);
+        }
+        if !seen_names.insert(name.clone()) {
+            return Ok(None); // duplicate sub-topic name
+        }
+        let mut filtered: Vec<String> = Vec::new();
+        for id in &sub.member_ids {
+            if !member_ids.contains(id.as_str()) {
+                continue; // unknown id — skip, don't fail
+            }
+            if !seen_members.insert(id.clone()) {
+                continue; // same member listed under two sub-topics — keep first
+            }
+            filtered.push(id.clone());
+        }
+        if filtered.len() < SPLIT_MIN_SUB_TOPIC_SIZE {
+            return Ok(None);
+        }
+        normalized.push((name, filtered, sub.reason.clone()));
+    }
+
+    if normalized.len() < 2 {
+        return Ok(None);
+    }
+
+    // Reject trivial splits where everything lands back in the original topic.
+    if normalized.len() == 1 && normalized[0].0 == original_topic {
+        return Ok(None);
+    }
+
+    // Snapshot BEFORE mutating, so undo can restore the original topic.
+    let moves: Vec<serde_json::Value> = normalized
+        .iter()
+        .flat_map(|(target, ids, _)| {
+            ids.iter().map(move |id| {
+                serde_json::json!({ "memory_id": id, "target_topic": target })
+            })
+        })
+        .collect();
+
+    let snapshot = serde_json::json!({
+        "action": "split",
+        "original_topic": original_topic,
+        "sub_topics": normalized
+            .iter()
+            .map(|(n, ids, r)| serde_json::json!({
+                "name": n,
+                "member_ids": ids,
+                "reason": r,
+            }))
+            .collect::<Vec<_>>(),
+        "moves": moves,
+    });
+    history::record("split", snapshot)?;
+
+    // Ensure sub-topics exist.
+    for (name, _, _) in &normalized {
+        topics::ensure(name, None, None)?;
+    }
+
+    // Reassign each member.
+    let mut total_moved = 0usize;
+    let by_id: std::collections::HashMap<&str, &memories::Memory> =
+        current_members.iter().map(|m| (m.id.as_str(), m)).collect();
+
+    for (target, ids, _) in &normalized {
+        for id in ids {
+            if let Some(m) = by_id.get(id.as_str()) {
+                if m.topic.as_deref() == Some(target.as_str()) {
+                    continue; // staying in original (target == original_topic case)
+                }
+                memories::update(&m.id, &m.title, &m.description, &m.content, Some(target))?;
+                total_moved += 1;
+            }
+        }
+    }
+
+    if total_moved == 0 {
+        return Ok(None);
+    }
+
+    // If the original topic is now empty (every member moved elsewhere), remove it.
+    let remaining = memories::list_by_topic(original_topic)?;
+    if remaining.is_empty() {
+        let _ = topics::delete_empty(original_topic);
+    }
+
+    // Reset size tracking for each new sub-topic so its own growth curve starts
+    // fresh — otherwise a new sub-topic would inherit the original's threshold.
+    for (name, _, _) in &normalized {
+        if name != original_topic {
+            let sub_size = memories::list_by_topic(name)?.len();
+            record_split_size(name, sub_size);
+        }
+    }
+
+    let summary = format!(
+        "{} → {} ({} memories)",
+        original_topic,
+        normalized
+            .iter()
+            .map(|(n, _, _)| n.clone())
+            .collect::<Vec<_>>()
+            .join("+"),
+        total_moved
+    );
+    Ok(Some(summary))
 }
 
 /// Classify all untopiced memories in batches.
@@ -601,6 +900,7 @@ pub fn undo_last() -> Result<String, String> {
         "merge" => undo_merge(&snapshot, &entry)?,
         "consolidate" => undo_consolidate(&snapshot)?,
         "relate" => undo_relate(&snapshot)?,
+        "split" => undo_split(&snapshot)?,
         _ => return Err(format!("unknown action: {}", action)),
     };
 
@@ -699,6 +999,69 @@ fn undo_merge(
             project,
         });
     }
+
+    Ok(())
+}
+
+/// Undo a split by moving every affected memory back to the original topic
+/// and removing any sub-topics that were created and are now empty.
+fn undo_split(snapshot: &serde_json::Value) -> Result<(), String> {
+    let original_topic = snapshot
+        .get("original_topic")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "snapshot missing original_topic".to_string())?;
+
+    let moves = snapshot
+        .get("moves")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "snapshot missing moves".to_string())?;
+
+    // Ensure the original topic exists again (it may have been removed when emptied).
+    topics::ensure(original_topic, None, None)?;
+
+    let mut touched_sub_topics: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
+    for entry in moves {
+        let memory_id = entry
+            .get("memory_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let target_topic = entry
+            .get("target_topic")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if memory_id.is_empty() {
+            continue;
+        }
+
+        if !target_topic.is_empty() && target_topic != original_topic {
+            touched_sub_topics.insert(target_topic.to_string());
+        }
+
+        if let Some(m) = memories::get(memory_id)? {
+            memories::update(
+                &m.id,
+                &m.title,
+                &m.description,
+                &m.content,
+                Some(original_topic),
+            )?;
+        }
+    }
+
+    // Drop any sub-topics the split created that are now empty.
+    for sub in touched_sub_topics {
+        let remaining = memories::list_by_topic(&sub)?;
+        if remaining.is_empty() {
+            let _ = topics::delete_empty(&sub);
+        }
+    }
+
+    // Restore the original's size tracker so the split phase doesn't
+    // immediately re-propose the same split on the next pass.
+    let current_size = memories::list_by_topic(original_topic)?.len();
+    record_split_size(original_topic, current_size);
 
     Ok(())
 }
@@ -959,5 +1322,39 @@ mod tests {
     fn test_extract_json_plain_fence() {
         let input = "```\n{\"foo\": 1}\n```";
         assert_eq!(extract_json(input), r#"{"foo": 1}"#);
+    }
+
+    #[test]
+    fn test_split_response_no_split() {
+        let raw = r#"{"split": false, "reason": "coherent"}"#;
+        let parsed: AiSplitResponse = serde_json::from_str(raw).unwrap();
+        assert!(!parsed.split);
+        assert_eq!(parsed.reason, "coherent");
+        assert!(parsed.sub_topics.is_empty());
+    }
+
+    #[test]
+    fn test_split_response_with_sub_topics() {
+        let raw = r#"{
+            "split": true,
+            "sub_topics": [
+                {"name": "kubernetes", "member_ids": ["a", "b", "c"], "reason": "k8s-specific"},
+                {"name": "kamal", "member_ids": ["d", "e", "f"], "reason": "kamal-specific"}
+            ]
+        }"#;
+        let parsed: AiSplitResponse = serde_json::from_str(raw).unwrap();
+        assert!(parsed.split);
+        assert_eq!(parsed.sub_topics.len(), 2);
+        assert_eq!(parsed.sub_topics[0].name, "kubernetes");
+        assert_eq!(parsed.sub_topics[0].member_ids.len(), 3);
+    }
+
+    #[test]
+    fn test_growth_guard_math() {
+        // With ratio 1.3: last=10 means re-evaluate at 13+; last=15 means re-evaluate at 20+.
+        let ratio = SPLIT_GROWTH_RATIO;
+        assert!(10.0 * ratio <= 13.0);
+        assert!(15.0 * ratio <= 20.0);
+        assert!(15.0 * ratio > 19.0); // 19 is NOT enough growth from 15
     }
 }

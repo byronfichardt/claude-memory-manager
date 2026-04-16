@@ -269,6 +269,34 @@ pub async fn set_auto_organize(enabled: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn get_split_threshold() -> Result<u32, String> {
+    blocking(|| {
+        let raw = settings::get(organizer::SETTING_SPLIT_THRESHOLD, "")?;
+        if raw.is_empty() {
+            return Ok(organizer::SPLIT_DEFAULT_THRESHOLD as u32);
+        }
+        Ok(raw
+            .parse::<u32>()
+            .unwrap_or(organizer::SPLIT_DEFAULT_THRESHOLD as u32))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn set_split_threshold(threshold: u32) -> Result<(), String> {
+    blocking(move || {
+        if threshold < organizer::SPLIT_THRESHOLD_MIN as u32 {
+            return Err(format!(
+                "threshold must be at least {}",
+                organizer::SPLIT_THRESHOLD_MIN
+            ));
+        }
+        settings::set(organizer::SETTING_SPLIT_THRESHOLD, &threshold.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn get_custom_db_dir() -> Result<String, String> {
     blocking(|| settings::get(SETTING_CUSTOM_DB_DIR, "")).await
 }

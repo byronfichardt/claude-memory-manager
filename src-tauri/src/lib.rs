@@ -45,6 +45,8 @@ pub fn run() {
             commands::autopilot::list_history,
             commands::autopilot::get_auto_organize,
             commands::autopilot::set_auto_organize,
+            commands::autopilot::get_split_threshold,
+            commands::autopilot::set_split_threshold,
             commands::autopilot::get_custom_db_dir,
             commands::autopilot::set_custom_db_dir,
             commands::autopilot::get_hook_status,

@@ -139,6 +139,8 @@ export interface OrganizerReport {
   new_topics_created: string[];
   merged_count: number;
   edges_created: number;
+  consolidated_topics: string[];
+  split_topics: string[];
   errors: string[];
 }
 

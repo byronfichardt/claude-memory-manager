@@ -36,6 +36,7 @@ export const useAppStore = defineStore("app", () => {
   const organizing = ref(false);
   const organizeProgress = ref<OrganizerProgress | null>(null);
   const autoOrganize = ref(false);
+  const splitThreshold = ref(15);
   const lastOrganizeReport = ref<OrganizerReport | null>(null);
   const error = ref<string | null>(null);
 
@@ -228,6 +229,24 @@ export const useAppStore = defineStore("app", () => {
     }
   }
 
+  async function loadSplitThreshold() {
+    try {
+      splitThreshold.value = await tauri.getSplitThreshold();
+    } catch (e) {
+      console.error("load split threshold:", e);
+    }
+  }
+
+  async function setSplitThresholdValue(threshold: number) {
+    try {
+      await tauri.setSplitThreshold(threshold);
+      splitThreshold.value = threshold;
+    } catch (e) {
+      error.value = String(e);
+      throw e;
+    }
+  }
+
   async function checkForChanges() {
     try {
       const count = await tauri.memoryCount();
@@ -273,6 +292,7 @@ export const useAppStore = defineStore("app", () => {
   async function initialize() {
     await loadStatus();
     await loadAutoOrganize();
+    await loadSplitThreshold();
     await startProgressListener();
     if (!needsSetup.value) {
       lastKnownCount.value = totalMemories.value;
@@ -293,6 +313,7 @@ export const useAppStore = defineStore("app", () => {
     lastSetupReport,
     lastOrganizeReport,
     autoOrganize,
+    splitThreshold,
     loading,
     searching,
     settingUp,
@@ -316,6 +337,8 @@ export const useAppStore = defineStore("app", () => {
     undoLast,
     loadAutoOrganize,
     setAutoOrganizeEnabled,
+    loadSplitThreshold,
+    setSplitThresholdValue,
     enableHook,
     disableHook,
     initialize,
