@@ -86,6 +86,14 @@ pub fn run() -> Result<(), String> {
 
     let mut out = String::new();
 
+    // Correction nudge goes first so it's the first thing Claude reads.
+    // Fires independently of retrieval — even on empty memory context, a
+    // correction should still prompt an immediate memory_add.
+    if detect_correction_signal(&event.prompt) {
+        out.push_str(CORRECTION_NUDGE);
+        out.push('\n');
+    }
+
     // Check for explicit "remember this" directive. If found, save it directly
     // as a deterministic manual memory.
     if let Some(text_to_save) = extract_remember_directive(&event.prompt) {
@@ -145,10 +153,11 @@ pub fn run() -> Result<(), String> {
         }
     }
 
-    if out.is_empty() {
-        // Nothing to inject — Claude proceeds as normal
-        return Ok(());
-    }
+    // Always-on save checklist. Appended last so Claude sees it right before
+    // composing its reply — the intended trigger point for the self-check.
+    // Fires on every prompt (≥ MIN_PROMPT_LEN, already filtered above).
+    out.push_str(SAVE_CHECKLIST);
+    out.push('\n');
 
     let stdout = io::stdout();
     let mut handle = stdout.lock();
@@ -320,6 +329,101 @@ fn hybrid_search(
     Ok(results)
 }
 
+const CORRECTION_NUDGE: &str = "\
+<memory-correction-detected>
+The user's message reads as a correction or pushback. Before responding to the rest of it, call memory_add with type=feedback to capture: (1) the rule, (2) why it matters. Save first, reply second — the save is the point, the reply is the easy part.
+</memory-correction-detected>";
+
+const SAVE_CHECKLIST: &str = "\
+<memory-save-checklist>
+Before replying, scan this turn for memory-worthy signals:
+- user correction or stated preference/convention
+- non-obvious project fact, debugging gotcha + fix, or architecture decision + rationale
+- project state change (status, ownership, deadlines)
+If any apply, call memory_add NOW — do not batch to end of session. Saves are cheap; reconstructing lost context is not.
+</memory-save-checklist>";
+
+/// Heuristic detector for correction/pushback signals in a user prompt.
+///
+/// Two classes of trigger:
+/// 1. Start-of-message words: "no", "don't", "do not", "stop", "actually",
+///    "wait", "nope" — corrections usually lead the message.
+/// 2. Anywhere phrases: "you missed", "you misunderstood", "that's wrong",
+///    "that is wrong", "not quite", "that's not right", "that's not what",
+///    "i already" — strong signals regardless of position.
+///
+/// Kept tight on purpose: false positives force Claude to waste a turn
+/// deciding not to save, which defeats the nudge.
+fn detect_correction_signal(prompt: &str) -> bool {
+    let lower = prompt.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+
+    const START_TRIGGERS: &[&str] = &[
+        "no", "don't", "dont", "do not", "stop", "actually", "wait", "nope",
+    ];
+    for trigger in START_TRIGGERS {
+        if starts_with_word(&lower, trigger) {
+            return true;
+        }
+    }
+
+    const ANYWHERE_TRIGGERS: &[&str] = &[
+        "you missed",
+        "you misunderstood",
+        "that's wrong",
+        "that is wrong",
+        "not quite",
+        "that's not right",
+        "that's not what",
+        "i already",
+    ];
+    for phrase in ANYWHERE_TRIGGERS {
+        if contains_phrase(&lower, phrase) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// True if `haystack` starts with `needle` followed by a non-word character
+/// (or end-of-string). Avoids matching "notebook" when looking for "no".
+/// Both args assumed lowercased.
+fn starts_with_word(haystack: &str, needle: &str) -> bool {
+    if !haystack.starts_with(needle) {
+        return false;
+    }
+    match haystack[needle.len()..].chars().next() {
+        None => true,
+        Some(c) => !is_word_char(c),
+    }
+}
+
+/// True if `haystack` contains `needle` with word boundaries on both sides.
+/// Both args assumed lowercased.
+fn contains_phrase(haystack: &str, needle: &str) -> bool {
+    let mut start = 0;
+    while let Some(pos) = haystack[start..].find(needle) {
+        let abs = start + pos;
+        let before_ok = abs == 0
+            || !is_word_char(haystack[..abs].chars().last().unwrap_or(' '));
+        let after_idx = abs + needle.len();
+        let after_ok = after_idx >= haystack.len()
+            || !is_word_char(haystack[after_idx..].chars().next().unwrap_or(' '));
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs + needle.len().max(1);
+    }
+    false
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '\'' || c == '_'
+}
+
 /// Detects explicit save-to-memory directives at the start of a user prompt.
 /// Returns the text content to save if found.
 ///
@@ -449,6 +553,63 @@ mod tests {
         assert_eq!(extract_remember_directive("how do I deploy this"), None);
         // Partial match — "remember" without colon shouldn't trigger
         assert_eq!(extract_remember_directive("I need to remember to update"), None);
+    }
+
+    #[test]
+    fn test_detect_correction_signal_start_triggers() {
+        assert!(detect_correction_signal("no, that's not what I meant"));
+        assert!(detect_correction_signal("No that's wrong"));
+        assert!(detect_correction_signal("don't do that"));
+        assert!(detect_correction_signal("dont do that"));
+        assert!(detect_correction_signal("do not use mocks here"));
+        assert!(detect_correction_signal("stop adding comments"));
+        assert!(detect_correction_signal("actually, use the other approach"));
+        assert!(detect_correction_signal("wait, back up"));
+        assert!(detect_correction_signal("nope try again"));
+    }
+
+    #[test]
+    fn test_detect_correction_signal_anywhere_triggers() {
+        assert!(detect_correction_signal("you missed the auth check"));
+        assert!(detect_correction_signal("i think you misunderstood"));
+        assert!(detect_correction_signal("that's wrong — it's port 5433"));
+        assert!(detect_correction_signal("hmm that is wrong"));
+        assert!(detect_correction_signal("not quite, try again"));
+        assert!(detect_correction_signal("that's not right"));
+        assert!(detect_correction_signal("that's not what I asked for"));
+        assert!(detect_correction_signal("i already said to skip that file"));
+    }
+
+    #[test]
+    fn test_detect_correction_signal_negatives() {
+        // Word boundary: don't fire on "notebook", "notes", "nope" only as prefix word
+        assert!(!detect_correction_signal("notebook setup question"));
+        assert!(!detect_correction_signal("notes on the API"));
+        assert!(!detect_correction_signal("how do I use stopwatch mode"));
+        // Benign use of trigger words mid-sentence
+        assert!(!detect_correction_signal("can you add a stop button"));
+        assert!(!detect_correction_signal("there is no error handling yet"));
+        assert!(!detect_correction_signal("how should I implement this"));
+        // Empty / whitespace
+        assert!(!detect_correction_signal(""));
+        assert!(!detect_correction_signal("   "));
+    }
+
+    #[test]
+    fn test_starts_with_word_boundary() {
+        assert!(starts_with_word("no, try again", "no"));
+        assert!(starts_with_word("no", "no"));
+        assert!(!starts_with_word("notebook is broken", "no"));
+        assert!(!starts_with_word("none of this works", "no"));
+        assert!(starts_with_word("don't", "don't"));
+    }
+
+    #[test]
+    fn test_contains_phrase_boundary() {
+        assert!(contains_phrase("you missed it", "you missed"));
+        assert!(contains_phrase("hmm, you missed.", "you missed"));
+        assert!(!contains_phrase("you missedit", "you missed"));
+        assert!(!contains_phrase("ayou missed", "you missed"));
     }
 
     #[test]
