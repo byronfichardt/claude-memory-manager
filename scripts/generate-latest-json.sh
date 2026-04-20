@@ -23,17 +23,32 @@ PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 TARGET_DIR="src-tauri/target"
 
+host_target() {
+  case "$(uname -m)" in
+    arm64|aarch64) printf 'aarch64-apple-darwin' ;;
+    x86_64)        printf 'x86_64-apple-darwin' ;;
+    *) echo "error: unsupported host arch $(uname -m)" >&2; return 1 ;;
+  esac
+}
+
 find_bundle() {
   local arch="$1"
   local candidate
-  for candidate in \
-    "${TARGET_DIR}/${arch}/release/bundle/macos/Claude Memory Manager.app.tar.gz" \
-    "${TARGET_DIR}/release/bundle/macos/Claude Memory Manager.app.tar.gz"; do
+  local arch_specific="${TARGET_DIR}/${arch}/release/bundle/macos/Claude Memory Manager.app.tar.gz"
+  if [ -f "${arch_specific}" ]; then
+    printf '%s' "${arch_specific}"
+    return 0
+  fi
+  # Fallback path (no --target passed to tauri build) belongs to the host arch only.
+  local host
+  host="$(host_target)" || return 1
+  if [ "${arch}" = "${host}" ]; then
+    candidate="${TARGET_DIR}/release/bundle/macos/Claude Memory Manager.app.tar.gz"
     if [ -f "${candidate}" ]; then
       printf '%s' "${candidate}"
       return 0
     fi
-  done
+  fi
   return 1
 }
 
