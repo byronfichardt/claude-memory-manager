@@ -5,6 +5,8 @@ import { useAppStore } from "@/stores/app";
 import { useTauri } from "@/composables/useTauri";
 import { getVersion } from "@tauri-apps/api/app";
 import { save, open } from "@tauri-apps/plugin-dialog";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import type {
   UninstallReport,
   ExportSummary,
@@ -129,6 +131,82 @@ async function importMemories() {
 
 getVersion().then((v) => (appVersion.value = v));
 
+type UpdateState =
+  | { kind: "idle" }
+  | { kind: "checking" }
+  | { kind: "up-to-date" }
+  | { kind: "available"; version: string; notes: string | null }
+  | { kind: "downloading"; version: string; downloaded: number; total: number | null }
+  | { kind: "ready"; version: string }
+  | { kind: "error"; message: string };
+
+const updateState = ref<UpdateState>({ kind: "idle" });
+const pendingUpdate = ref<Update | null>(null);
+
+async function checkForUpdates() {
+  updateState.value = { kind: "checking" };
+  try {
+    const update = await check();
+    if (!update) {
+      updateState.value = { kind: "up-to-date" };
+      return;
+    }
+    pendingUpdate.value = update;
+    updateState.value = {
+      kind: "available",
+      version: update.version,
+      notes: update.body ?? null,
+    };
+  } catch (e) {
+    updateState.value = { kind: "error", message: String(e) };
+  }
+}
+
+async function installUpdate() {
+  const update = pendingUpdate.value;
+  if (!update) return;
+  updateState.value = {
+    kind: "downloading",
+    version: update.version,
+    downloaded: 0,
+    total: null,
+  };
+  try {
+    let total: number | null = null;
+    let downloaded = 0;
+    await update.downloadAndInstall((event) => {
+      if (event.event === "Started") {
+        total = event.data.contentLength ?? null;
+        updateState.value = {
+          kind: "downloading",
+          version: update.version,
+          downloaded: 0,
+          total,
+        };
+      } else if (event.event === "Progress") {
+        downloaded += event.data.chunkLength;
+        updateState.value = {
+          kind: "downloading",
+          version: update.version,
+          downloaded,
+          total,
+        };
+      } else if (event.event === "Finished") {
+        updateState.value = { kind: "ready", version: update.version };
+      }
+    });
+    await relaunch();
+  } catch (e) {
+    updateState.value = { kind: "error", message: String(e) };
+  }
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
 onMounted(() => {
   app.loadStatus();
 });
@@ -246,6 +324,75 @@ function goHome() {
           <span class="chev">›</span>
           <kbd class="kbd">Login Items</kbd>
           and add Claude Memory Manager.
+        </p>
+      </div>
+    </section>
+
+    <!-- Updates -->
+    <section class="section">
+      <h2 class="section-title">Updates</h2>
+
+      <div class="card">
+        <div class="row">
+          <div class="row-main">
+            <div class="label">App version</div>
+            <div class="sub">
+              <span v-if="updateState.kind === 'idle'" class="status-line">
+                Current version v{{ appVersion }}
+              </span>
+              <span v-else-if="updateState.kind === 'checking'" class="status-line">
+                <span class="status-dot"></span>
+                Checking for updates…
+              </span>
+              <span v-else-if="updateState.kind === 'up-to-date'" class="status-line ok">
+                <span class="status-dot"></span>
+                You're on the latest version (v{{ appVersion }})
+              </span>
+              <span v-else-if="updateState.kind === 'available'" class="status-line warn">
+                <span class="status-dot"></span>
+                Update available: v{{ updateState.version }}
+              </span>
+              <span v-else-if="updateState.kind === 'downloading'" class="status-line">
+                <span class="status-dot"></span>
+                Downloading v{{ updateState.version }} —
+                {{ formatBytes(updateState.downloaded) }}{{ updateState.total
+                  ? ` / ${formatBytes(updateState.total)}`
+                  : "" }}
+              </span>
+              <span v-else-if="updateState.kind === 'ready'" class="status-line ok">
+                <span class="status-dot"></span>
+                v{{ updateState.version }} installed — relaunching…
+              </span>
+              <span v-else-if="updateState.kind === 'error'" class="status-line warn">
+                <span class="status-dot"></span>
+                {{ updateState.message }}
+              </span>
+            </div>
+          </div>
+          <div class="button-group">
+            <button
+              v-if="updateState.kind !== 'available' && updateState.kind !== 'downloading' && updateState.kind !== 'ready'"
+              class="primary-btn sm"
+              :disabled="updateState.kind === 'checking'"
+              @click="checkForUpdates"
+            >
+              {{ updateState.kind === "checking" ? "Checking…" : "Check for updates" }}
+            </button>
+            <button
+              v-if="updateState.kind === 'available'"
+              class="primary-btn sm"
+              @click="installUpdate"
+            >
+              Install v{{ updateState.version }}
+            </button>
+          </div>
+        </div>
+
+        <p
+          v-if="updateState.kind === 'available' && updateState.notes"
+          class="sub release-notes"
+        >
+          {{ updateState.notes }}
         </p>
       </div>
     </section>
@@ -834,6 +981,14 @@ function goHome() {
   font-size: 0.75rem;
   line-height: 1.5;
   color: var(--color-text-secondary);
+}
+
+.release-notes {
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--color-surface);
+  border-radius: 0.25rem;
+  white-space: pre-wrap;
 }
 
 .inline-code {
