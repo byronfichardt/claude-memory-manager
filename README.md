@@ -20,11 +20,14 @@ An automated, self-organizing memory system for [Claude Code](https://code.claud
 ## What it does
 
 1. **Ingests** your existing Claude Code memory files (`~/.claude*/projects/*/memory/`) into a central SQLite store.
-2. **Injects relevant memories automatically** into every Claude Code session via a `UserPromptSubmit` hook — Claude sees matching memories before it processes each message.
-3. **Saves new memories** when Claude decides to (via an MCP `memory_add` tool) or when you use a `remember:` directive in your prompt.
-4. **Organizes automatically** — runs an AI-powered classification + deduplication pass on launch to keep the store clean.
-5. **Lives in your menu bar** — runs as a macOS tray icon next to the clock. Right-click for "Open Dashboard" or "Quit". No Dock icon, no window clutter.
-6. **Provides a tiny UI** for browsing, searching, and editing memories when you want to — the app is meant to be mostly invisible.
+2. **Injects relevant memories automatically** into every Claude Code session via a `UserPromptSubmit` hook — Claude sees matching memories before it processes each message, ranked with project affinity so memories from the project you're in float to the top.
+3. **Nudges Claude to save** — the same hook also emits a save-checklist on every prompt and a correction-detected block when your message looks like pushback, so corrections and preferences don't slip past unsaved.
+4. **Saves new memories** when Claude decides to (via an MCP `memory_add` tool) or when you use a `remember:` directive in your prompt.
+5. **Organizes automatically** — a 4-phase AI pass (classify → dedup → consolidate → split oversized topics) runs on launch to keep the store clean. Every destructive step is snapshotted to a history log so you can undo.
+6. **Updates itself** — Settings → Updates checks GitHub Releases and installs signed updates with one click.
+7. **Exports / imports** — back the whole store up to JSON, restore on a new machine in merge or replace mode.
+8. **Lives in your menu bar** — runs as a macOS tray icon next to the clock. Right-click for "Open Dashboard" or "Quit". No Dock icon, no window clutter.
+9. **Provides a tiny UI** for browsing, searching, and editing memories when you want to — the app is meant to be mostly invisible.
 
 ## How it works
 
@@ -57,8 +60,8 @@ An automated, self-organizing memory system for [Claude Code](https://code.claud
 
 Two independent pathways feed into the store:
 
-- **UserPromptSubmit hook** (reads) — fires on every user message, queries the store using FTS5, injects up to 5 relevant memories as a `<memory-context>` block.
-- **MCP server** (reads & writes) — exposes `memory_search`, `memory_add`, `memory_get`, and `memory_list` tools for Claude to call when it needs targeted lookups or wants to save something new. Registered at user scope (`claude mcp add --scope user`).
+- **UserPromptSubmit hook** (reads + nudges) — fires on every user message and emits up to three blocks: a `<memory-context>` block (top hits from a hybrid search: FTS5 + 1-hop graph expansion + project-affinity re-ranking), a `<memory-save-checklist>` block (always, listing save-worthy signals so Claude self-checks before replying), and a `<memory-correction-detected>` block (when the prompt matches correction heuristics like "no", "actually", "wait", "you missed", etc.).
+- **MCP server** (reads & writes) — exposes `memory_search`, `memory_add`, `memory_get`, `memory_list`, and `memory_related` tools for Claude to call when it needs targeted lookups or wants to save something new. Registered at user scope (`claude mcp add --scope user`).
 
 Both are installed automatically when you click "Get started" the first time.
 
@@ -68,12 +71,21 @@ Both are installed automatically when you click "Get started" the first time.
 
 Prior to this tool, Claude Code memories only help if Claude happens to call `memory_search` in a session. Most sessions don't. The `UserPromptSubmit` hook fixes that: every message Claude sees, it already has the relevant memories in context. No tool call overhead, no Claude forgetting.
 
+### Project-aware retrieval
+
+The hook detects which project you're working in (transcript-inferred, with the cwd as a fallback) and re-ranks results so memories scoped to that project float to the top while cross-project results are slightly demoted. Project context is also passed through to `memory_add` and `memory_search` MCP calls so Claude saves new project memories with the right scope automatically. Retrieval itself is hybrid — FTS5 over-fetches candidates, then 1-hop graph expansion pulls in co-accessed neighbors before re-ranking.
+
+### Save-checklist + correction nudges
+
+Reading memories isn't enough — Claude also has to save corrections, preferences, and project facts as it learns them. The hook appends a `<memory-save-checklist>` to every prompt listing the signals worth saving, and prepends a `<memory-correction-detected>` block whenever your message matches correction heuristics ("no", "don't", "actually", "wait", "you missed", etc.). The combination dramatically increases in-turn `memory_add` calls vs. relying on Claude to remember on its own.
+
 ### AI-powered organization
 
-On every launch (or manually), the organizer runs a 3-phase pass:
+On every launch (or manually), the organizer runs a 4-phase pass:
 - **Classify** untopiced memories into topics via `claude -p` (batched, 25 at a time)
 - **Dedup** within each topic — merges near-duplicates with full content reconciliation
 - **Consolidate** overlapping topics — merges single-member or semantically-redundant topics into broader ones
+- **Split oversized topics** — when a topic grows past a threshold (configurable in Settings → Organization), the AI evaluates whether to split it into narrower sub-topics, with a per-topic growth guard so it only re-evaluates after meaningful change
 
 Every destructive operation is snapshotted to a history log, so you can undo.
 
@@ -93,12 +105,20 @@ The app runs as a macOS menu bar icon (next to Wi-Fi, clock, etc.) — it doesn'
 
 Closing the dashboard window hides it back to the tray rather than quitting. The hook and MCP server work independently of the window — they're invoked by Claude Code directly via the binary, so memory injection works whether the dashboard is open or not.
 
+### In-app updates
+
+Settings → Updates checks the latest GitHub release, shows release notes for any new version, and downloads + installs the signed `.app.tar.gz` over the running app with one click. Updates are minisign-signed and rejected if the signature doesn't match the embedded public key. The app relaunches into the new version automatically.
+
+### Export / import
+
+Settings → Memory store → Export JSON dumps every memory (with topics, edges, and project scopes) to a JSON file. Import accepts the same format in two modes: **merge** (additive, no deletions) and **replace** (wipes the existing store first — confirmed twice in the UI). Useful for moving between machines or for ad-hoc backups before risky organizer runs.
+
 ### Tiny UI
 
 - **Home**: topics grid with counts, one-click organize, status ribbon
 - **Topic detail**: list of memories, preview/edit mode (markdown rendering), inline delete
 - **Search**: FTS5 search across everything with highlighted snippets
-- **Settings**: toggles for MCP registration, hook, auto-organize + per-config status table
+- **Settings**: General · Updates · Claude Code integration (per-config hook + MCP status table) · Memory store (DB path, ingest, export/import) · Organization (auto-organize, split threshold, undo last) · Danger zone (clean uninstall)
 
 Most users should rarely need to open the dashboard — it's the settings/maintenance panel for an otherwise invisible system.
 
@@ -122,10 +142,11 @@ Latency stays flat as the store grows — FTS5 + WAL mode handles 10K+ memories 
 ## Architecture
 
 - **Rust (Tauri 2)** backend
-  - `src-tauri/src/store/` — SQLite with FTS5 (porter tokenizer), memories/topics/history/settings tables, WAL mode
-  - `src-tauri/src/services/hook.rs` — UserPromptSubmit hook handler (stdin JSON in, markdown context out)
+  - `src-tauri/src/store/` — SQLite with FTS5 (porter tokenizer); memories / topics / edges / history / settings tables; WAL mode
+  - `src-tauri/src/services/hook.rs` — UserPromptSubmit hook handler (stdin JSON in; emits `<memory-context>` + `<memory-save-checklist>` + `<memory-correction-detected>` blocks)
+  - `src-tauri/src/services/project.rs` — Active-project detection (transcript-inferred → cwd fallback) and project-affinity scoring
   - `src-tauri/src/services/mcp_server.rs` — Minimal stdio MCP server (JSON-RPC, no heavy SDK)
-  - `src-tauri/src/services/organizer.rs` — Classify / dedup / consolidate phases
+  - `src-tauri/src/services/organizer.rs` — 4-phase pass: classify / dedup / consolidate / split-oversized
   - `src-tauri/src/services/bootstrap.rs` — Manages `~/.claude*/CLAUDE.md` + `settings.json`
   - `src-tauri/src/services/ingestion.rs` — One-shot import of existing memory files
   - `src-tauri/src/services/claude_api.rs` — `claude -p` subprocess wrapper (with `--strict-mcp-config` to prevent MCP recursion)
@@ -149,6 +170,18 @@ The same binary has three modes, selected by command-line flag:
 - **macOS** (arm64 prebuilt binary currently available — see Releases; other platforms need a source build)
 - **Claude Code CLI** installed and authenticated (`claude auth` must work)
 - **Rust toolchain** + **Node.js 20+** (only needed for building from source)
+
+### From a release (recommended)
+
+1. Grab the latest `.dmg` (or `.zip`) from [Releases](https://github.com/byronfichardt/claude-memory-manager/releases).
+2. Move `Claude Memory Manager.app` to `/Applications/`.
+3. Strip the macOS quarantine flag (one-time, see Troubleshooting if double-clicking shows "damaged"):
+   ```bash
+   xattr -dr com.apple.quarantine "/Applications/Claude Memory Manager.app"
+   ```
+4. Launch the app, click the menu-bar icon → **Open Dashboard** → **Get started**.
+
+Future versions install themselves via Settings → Updates — see [Updating](#updating).
 
 ### From source
 
@@ -220,6 +253,18 @@ Per-Claude-config files the app writes to:
 
 Everything outside those markers/keys is left untouched.
 
+## Updating
+
+From v0.2.2 onward, the app updates itself:
+
+1. Open the dashboard → **Settings** → **Updates**.
+2. Click **Check for updates**. The app reads `latest.json` from the latest GitHub release.
+3. If a new version is available, the release notes show inline. Click **Install vX.Y.Z** to download and apply the signed bundle, then the app relaunches.
+
+Updates are minisign-signed against a public key embedded at build time; mismatched signatures are rejected. If the updater can't reach GitHub or finds no newer version, it tells you in the same row.
+
+> If you're on **v0.2.1 or earlier**, the in-app updater isn't present yet — download v0.2.2 manually from [Releases](https://github.com/byronfichardt/claude-memory-manager/releases), drop the `.app` into `/Applications/`, strip quarantine (see Troubleshooting), and you're set for the rest.
+
 ## Uninstall
 
 macOS doesn't run any code when you drag an app to the Trash, so Claude Memory Manager can't clean up automatically. Use the in-app button before removing the app bundle.
@@ -276,7 +321,7 @@ After running that once, the app launches normally on double-click forever after
 To verify you got the real file (not a tampered one), compare its SHA-256 against the values in the release checksums file:
 
 ```bash
-shasum -a 256 ~/Downloads/claude-memory-manager-0.1.0-macos-arm64.dmg
+shasum -a 256 ~/Downloads/Claude-Memory-Manager_*_aarch64.dmg
 # should match the value in checksums.sha256 from the release
 ```
 
@@ -284,9 +329,9 @@ The long-term fix is code-signing + notarization with an Apple Developer certifi
 
 ### "I don't see memories being injected"
 
-- Check Settings → MCP Server and Settings → Auto memory injection. Both should show as registered/installed.
+- Open Settings → **Claude Code integration** and check the per-config status table — every row should show the hook installed and the MCP server registered.
 - Verify the hook works: `echo '{"prompt":"docker","session_id":"x","cwd":"/"}' | /path/to/claude-memory-manager --hook`
-- If you recently moved the binary, re-click "Register / Re-register" in Settings to update the paths.
+- If you recently moved the binary, click **Re-register** in the same section to update the paths in every config.
 
 ### "My endpoint protection keeps asking for permission"
 
@@ -297,9 +342,9 @@ The unsigned binary is the culprit — most endpoint protection tools prompt on 
 
 ### "Organize picked bad topics / merged things I didn't want"
 
-- Settings → Organization → **Undo last** reverts the most recent destructive operation.
+- Settings → Organization → **Undo last** reverts the most recent destructive operation (works for consolidate merges, dedup merges, and topic splits).
 - Run "Organize now" again after editing memories manually.
-- The consolidate prompt is tuned to be conservative but occasionally picks questionable merges.
+- The consolidate and split prompts are tuned to be conservative but occasionally pick questionable merges or splits — adjust the **split threshold** in Settings → Organization if topics are being split too eagerly.
 
 ### "The app slowed down during organize"
 
