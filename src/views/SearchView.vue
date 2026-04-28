@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { onMounted, watch, ref } from "vue";
+import { onMounted, watch, ref, computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useAppStore } from "@/stores/app";
 import { useTauri } from "@/composables/useTauri";
 import MarkdownBody from "@/components/MarkdownBody.vue";
-import type { Memory } from "@/types";
+import type { Memory, DateFilter } from "@/types";
 
 const route = useRoute();
 const router = useRouter();
@@ -12,9 +12,39 @@ const app = useAppStore();
 const tauri = useTauri();
 
 const openMemory = ref<Memory | null>(null);
+const dateFilter = ref<DateFilter>("all");
+const timelineMemories = ref<Memory[]>([]);
+const timelineLoading = ref(false);
+
+const DATE_FILTERS: { label: string; value: DateFilter; ms: number | null }[] = [
+  { label: "All time", value: "all", ms: null },
+  { label: "Last 7 days", value: "7d", ms: 7 * 24 * 60 * 60 * 1000 },
+  { label: "Last 30 days", value: "30d", ms: 30 * 24 * 60 * 60 * 1000 },
+  { label: "Last 90 days", value: "90d", ms: 90 * 24 * 60 * 60 * 1000 },
+];
+
+const showingTimeline = computed(() => dateFilter.value !== "all" && !app.searchQuery);
 
 async function runQuery(q: string) {
   await app.search(q);
+}
+
+async function applyDateFilter(filter: DateFilter) {
+  dateFilter.value = filter;
+  if (filter === "all") {
+    timelineMemories.value = [];
+    return;
+  }
+  const entry = DATE_FILTERS.find((f) => f.value === filter);
+  if (!entry?.ms) return;
+  timelineLoading.value = true;
+  try {
+    timelineMemories.value = await tauri.listMemoriesSince(Date.now() - entry.ms, 200);
+  } catch (e) {
+    app.error = String(e);
+  } finally {
+    timelineLoading.value = false;
+  }
 }
 
 onMounted(() => {
@@ -48,8 +78,15 @@ function gotoTopic(topic: string | null) {
 }
 
 function highlight(snippet: string): string {
-  // The FTS5 snippet function returns [word] markers around matches
   return snippet.replace(/\[([^\]]+)\]/g, '<mark>$1</mark>');
+}
+
+function formatDate(ts: number): string {
+  return new Date(ts * 1000).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
 }
 </script>
 
@@ -57,19 +94,55 @@ function highlight(snippet: string): string {
   <div class="search">
     <div class="search-head">
       <h1 class="search-title">
-        Search results
-        <span v-if="app.searchQuery" class="query">for "{{ app.searchQuery }}"</span>
+        <template v-if="app.searchQuery">
+          Search results <span class="query">for "{{ app.searchQuery }}"</span>
+        </template>
+        <template v-else>Timeline</template>
       </h1>
-      <span v-if="!app.searching" class="count">{{ app.searchResults.length }} result{{ app.searchResults.length === 1 ? "" : "s" }}</span>
+      <span v-if="!app.searching && app.searchQuery" class="count">{{ app.searchResults.length }} result{{ app.searchResults.length === 1 ? "" : "s" }}</span>
     </div>
 
-    <div v-if="app.searching" class="empty">Searching...</div>
+    <!-- Date filter bar (visible when no active search query) -->
+    <div v-if="!app.searchQuery" class="date-filters">
+      <button
+        v-for="f in DATE_FILTERS"
+        :key="f.value"
+        class="date-filter-btn"
+        :class="{ 'is-active': dateFilter === f.value }"
+        @click="applyDateFilter(f.value)"
+      >
+        {{ f.label }}
+      </button>
+    </div>
+
+    <div v-if="app.searching || timelineLoading" class="empty">Loading...</div>
     <div v-else-if="app.searchResults.length === 0 && app.searchQuery" class="empty">
       No matches for "{{ app.searchQuery }}"
     </div>
-    <div v-else-if="!app.searchQuery" class="empty">Type a query in the search bar above.</div>
+    <div v-else-if="showingTimeline && timelineMemories.length === 0" class="empty">
+      No memories in this time window.
+    </div>
+    <div v-else-if="!app.searchQuery && !showingTimeline" class="empty">Type a query in the search bar above, or select a time filter.</div>
 
-    <div v-else class="result-list">
+    <!-- Timeline view -->
+    <div v-if="showingTimeline && timelineMemories.length > 0" class="result-list">
+      <button
+        v-for="mem in timelineMemories"
+        :key="mem.id"
+        class="result-item"
+        @click="openMemory = mem"
+      >
+        <div class="result-head">
+          <span class="result-title">{{ mem.title }}</span>
+          <span v-if="mem.topic" class="topic-tag" @click.stop="gotoTopic(mem.topic)">{{ mem.topic }}</span>
+        </div>
+        <div v-if="mem.description" class="result-desc">{{ mem.description }}</div>
+        <div class="result-date">{{ formatDate(mem.updated_at) }}</div>
+      </button>
+    </div>
+
+    <!-- Search results -->
+    <div v-else-if="app.searchQuery" class="result-list">
       <button
         v-for="hit in app.searchResults"
         :key="hit.id"
@@ -142,6 +215,38 @@ function highlight(snippet: string): string {
 }
 .count {
   font-size: 0.75rem;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.date-filters {
+  display: flex;
+  gap: 0.375rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+.date-filter-btn {
+  padding: 0.3125rem 0.75rem;
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: 1rem;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.date-filter-btn:hover {
+  color: var(--color-text-primary);
+  background: var(--color-surface-hover);
+}
+.date-filter-btn.is-active {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+  color: var(--color-accent);
+}
+
+.result-date {
+  font-size: 0.6875rem;
   color: var(--color-text-muted);
   font-variant-numeric: tabular-nums;
 }

@@ -16,6 +16,7 @@ import type {
   ExportSummary,
   ImportMode,
   ImportReport,
+  RepoGraph,
 } from "@/types";
 
 export function useTauri() {
@@ -100,5 +101,19 @@ export function useTauri() {
       invoke<ExportSummary>("export_memories", { path }),
     importMemories: (path: string, mode: ImportMode) =>
       invoke<ImportReport>("import_memories", { path, mode }),
+
+    // Repo relationship graph
+    getRepoGraph: () => invoke<RepoGraph>("get_repo_graph"),
+
+    // Bulk operations
+    bulkDeleteMemories: (ids: string[]) =>
+      invoke<number>("bulk_delete_memories", { ids }),
+
+    // Timeline / date-filtered list
+    listMemoriesSince: (sinceTsMs: number, limit?: number) =>
+      invoke<Memory[]>("list_memories_since", {
+        sinceTs: Math.floor(sinceTsMs / 1000),
+        limit,
+      }),
   };
 }

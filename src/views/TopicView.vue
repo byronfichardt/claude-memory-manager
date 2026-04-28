@@ -15,6 +15,51 @@ const expandedId = ref<string | null>(null);
 const mode = ref<"preview" | "edit">("preview");
 const deleteConfirm = ref<string | null>(null);
 
+const batchMode = ref(false);
+const selectedIds = ref<Set<string>>(new Set());
+const bulkDeleting = ref(false);
+const bulkDeleteConfirm = ref(false);
+
+function toggleBatchMode() {
+  batchMode.value = !batchMode.value;
+  selectedIds.value = new Set();
+  bulkDeleteConfirm.value = false;
+  if (batchMode.value) {
+    expandedId.value = null;
+  }
+}
+
+function toggleSelect(id: string) {
+  const next = new Set(selectedIds.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  selectedIds.value = next;
+}
+
+function selectAll() {
+  selectedIds.value = new Set(app.memories.map((m) => m.id));
+}
+
+function clearSelection() {
+  selectedIds.value = new Set();
+}
+
+async function bulkDelete() {
+  if (selectedIds.value.size === 0) return;
+  bulkDeleting.value = true;
+  try {
+    await tauri.bulkDeleteMemories([...selectedIds.value]);
+    selectedIds.value = new Set();
+    bulkDeleteConfirm.value = false;
+    batchMode.value = false;
+    await load();
+  } catch (e) {
+    app.error = String(e);
+  } finally {
+    bulkDeleting.value = false;
+  }
+}
+
 // Editing state — only populated when a memory is expanded + in edit mode
 const editTitle = ref("");
 const editDescription = ref("");
@@ -151,7 +196,40 @@ async function confirmDelete(id: string) {
 
     <div class="topic-header">
       <h1 class="topic-title">{{ displayTitle }}</h1>
-      <span class="topic-count-meta">{{ app.memories.length }} memor{{ app.memories.length === 1 ? "y" : "ies" }}</span>
+      <div class="topic-actions">
+        <span class="topic-count-meta">{{ app.memories.length }} memor{{ app.memories.length === 1 ? "y" : "ies" }}</span>
+        <button
+          v-if="app.memories.length > 0"
+          class="batch-toggle-btn"
+          :class="{ 'is-active': batchMode }"
+          @click="toggleBatchMode"
+        >
+          {{ batchMode ? "Cancel" : "Select" }}
+        </button>
+      </div>
+    </div>
+
+    <!-- Batch action toolbar -->
+    <div v-if="batchMode" class="batch-toolbar">
+      <div class="batch-selection-info">
+        <span class="batch-count">{{ selectedIds.size }} selected</span>
+        <button class="batch-link-btn" @click="selectAll">All</button>
+        <button class="batch-link-btn" v-if="selectedIds.size > 0" @click="clearSelection">None</button>
+      </div>
+      <div class="batch-actions" v-if="selectedIds.size > 0">
+        <template v-if="!bulkDeleteConfirm">
+          <button class="danger-btn" @click="bulkDeleteConfirm = true">
+            Delete {{ selectedIds.size }}
+          </button>
+        </template>
+        <template v-else>
+          <span class="confirm-text">Really delete {{ selectedIds.size }}?</span>
+          <button class="ghost-btn" @click="bulkDeleteConfirm = false">Cancel</button>
+          <button class="danger-btn" :disabled="bulkDeleting" @click="bulkDelete">
+            {{ bulkDeleting ? "Deleting..." : "Delete" }}
+          </button>
+        </template>
+      </div>
     </div>
 
     <div v-if="app.loading" class="empty">Loading...</div>
@@ -162,9 +240,16 @@ async function confirmDelete(id: string) {
         v-for="memory in app.memories"
         :key="memory.id"
         class="memory-item"
-        :class="{ 'is-expanded': expandedId === memory.id }"
+        :class="{ 'is-expanded': expandedId === memory.id, 'is-selected': selectedIds.has(memory.id) }"
       >
-        <button class="memory-head" @click="toggle(memory)">
+        <button class="memory-head" @click="batchMode ? toggleSelect(memory.id) : toggle(memory)">
+          <label v-if="batchMode" class="batch-checkbox" @click.stop>
+            <input
+              type="checkbox"
+              :checked="selectedIds.has(memory.id)"
+              @change="toggleSelect(memory.id)"
+            />
+          </label>
           <div class="memory-info">
             <div class="memory-title">{{ memory.title }}</div>
             <div v-if="memory.description" class="memory-desc">{{ memory.description }}</div>
@@ -362,10 +447,84 @@ async function confirmDelete(id: string) {
   letter-spacing: -0.02em;
   text-transform: capitalize;
 }
+.topic-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
 .topic-count-meta {
   font-size: 0.75rem;
   color: var(--color-text-muted);
   font-variant-numeric: tabular-nums;
+}
+.batch-toggle-btn {
+  padding: 0.25rem 0.625rem;
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: 0.25rem;
+  color: var(--color-text-muted);
+  font-size: 0.6875rem;
+  cursor: pointer;
+}
+.batch-toggle-btn:hover,
+.batch-toggle-btn.is-active {
+  color: var(--color-accent);
+  border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+}
+
+.batch-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.625rem 0.875rem;
+  background: color-mix(in srgb, var(--color-accent) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 20%, transparent);
+  border-radius: 0.375rem;
+  margin-bottom: 0.75rem;
+  gap: 0.75rem;
+}
+.batch-selection-info {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.batch-count {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.batch-link-btn {
+  background: none;
+  border: none;
+  color: var(--color-accent);
+  font-size: 0.6875rem;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+.batch-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.batch-checkbox {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  margin-right: 0.25rem;
+}
+.batch-checkbox input {
+  width: 0.9375rem;
+  height: 0.9375rem;
+  cursor: pointer;
+  accent-color: var(--color-accent);
+}
+
+.memory-item.is-selected {
+  background: color-mix(in srgb, var(--color-accent) 5%, var(--color-surface-alt));
+  border-color: color-mix(in srgb, var(--color-accent) 25%, transparent);
 }
 
 .empty {

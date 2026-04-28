@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::services::project;
-use crate::store::{edges, memories};
+use crate::store::{edges, memories, repo_edges};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "claude-memory-manager";
@@ -282,6 +282,46 @@ fn handle_tools_list() -> Value {
                     },
                     "required": ["id"]
                 }
+            },
+            {
+                "name": "repo_link",
+                "description": "Record a dependency relationship between two repositories or services. Call this when you notice that the current codebase calls, imports, or depends on another service — e.g. an HTTP client pointing to another service's URL, an imported SDK from another repo, or a shared API contract. This builds an organic cross-repo graph that improves memory context over time.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "source_repo": {
+                            "type": "string",
+                            "description": "Absolute git root path (or short name) of the repo that has the dependency. Usually the current repo."
+                        },
+                        "target_repo": {
+                            "type": "string",
+                            "description": "Absolute git root path (or short name) of the repo being depended on."
+                        },
+                        "relationship_type": {
+                            "type": "string",
+                            "description": "Nature of the dependency: 'calls' (HTTP/RPC), 'imports' (library/SDK), 'shares-schema' (shared DB/types), 'deploys-to' (deployment dependency), 'extends' (plugin/extension).",
+                            "enum": ["calls", "imports", "shares-schema", "deploys-to", "extends"]
+                        },
+                        "evidence": {
+                            "type": "string",
+                            "description": "Brief human-readable description of where you saw this dependency, e.g. 'SanityService.php makes HTTP calls to SANITY_CMS_URL env var'."
+                        }
+                    },
+                    "required": ["source_repo", "target_repo", "relationship_type", "evidence"]
+                }
+            },
+            {
+                "name": "repo_graph",
+                "description": "Retrieve the repository relationship graph — all service/project dependencies that have been recorded. Optionally filter to edges involving a specific repo. Use this to understand architecture context before making cross-service changes.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo": {
+                            "type": "string",
+                            "description": "Optional: filter to edges involving this repo (as source or target). If omitted, returns the full graph."
+                        }
+                    }
+                }
             }
         ]
     })
@@ -300,6 +340,8 @@ fn handle_tools_call(params: Value) -> Result<Value, (i32, String)> {
         "memory_get" => tool_memory_get(arguments),
         "memory_list" => tool_memory_list(arguments),
         "memory_related" => tool_memory_related(arguments),
+        "repo_link" => tool_repo_link(arguments),
+        "repo_graph" => tool_repo_graph(arguments),
         _ => Err(format!("Unknown tool: {}", name)),
     };
 
@@ -532,6 +574,70 @@ fn tool_memory_related(args: Value) -> Result<String, String> {
                 mem.description,
             ));
         }
+    }
+
+    Ok(out)
+}
+
+fn tool_repo_link(args: Value) -> Result<String, String> {
+    let source_repo = args
+        .get("source_repo")
+        .and_then(Value::as_str)
+        .ok_or("source_repo required")?
+        .trim();
+    let target_repo = args
+        .get("target_repo")
+        .and_then(Value::as_str)
+        .ok_or("target_repo required")?
+        .trim();
+    let relationship_type = args
+        .get("relationship_type")
+        .and_then(Value::as_str)
+        .unwrap_or("calls")
+        .trim();
+    let evidence = args
+        .get("evidence")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+
+    let edge = repo_edges::upsert(source_repo, target_repo, relationship_type, evidence)?;
+
+    Ok(format!(
+        "Repo relationship recorded.\n{} --[{}]--> {}\nEvidence: {}\nid: {}",
+        short_project(source_repo),
+        edge.relationship_type,
+        short_project(target_repo),
+        edge.evidence,
+        edge.id,
+    ))
+}
+
+fn tool_repo_graph(args: Value) -> Result<String, String> {
+    let filter_repo = args.get("repo").and_then(Value::as_str);
+
+    let edges = repo_edges::list(filter_repo)?;
+
+    if edges.is_empty() {
+        return Ok(match filter_repo {
+            Some(r) => format!("No repo relationships recorded for {}.", short_project(r)),
+            None => "No repo relationships recorded yet. Use repo_link to record service dependencies as you discover them.".to_string(),
+        });
+    }
+
+    let mut out = match filter_repo {
+        Some(r) => format!("Repo relationships for {} ({} edges):\n\n", short_project(r), edges.len()),
+        None => format!("Full repo relationship graph ({} edges):\n\n", edges.len()),
+    };
+
+    for edge in &edges {
+        out.push_str(&format!(
+            "{} --[{}]--> {}\n  Evidence: {}\n\n",
+            short_project(&edge.source_repo),
+            edge.relationship_type,
+            short_project(&edge.target_repo),
+            edge.evidence,
+        ));
     }
 
     Ok(out)

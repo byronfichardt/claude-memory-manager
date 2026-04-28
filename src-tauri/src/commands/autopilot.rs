@@ -6,7 +6,7 @@ use crate::services::installer::{
     SETTING_CUSTOM_DB_DIR, SETTING_HOOK_ENABLED,
 };
 use crate::services::{bootstrap, organizer, portable};
-use crate::store::{edges, history, memories, settings, topics};
+use crate::store::{edges, history, memories, repo_edges, settings, topics};
 
 const SETTING_AUTO_ORGANIZE: &str = "auto_organize";
 
@@ -500,4 +500,19 @@ fn is_server_registered_in_dir(config_dir: &std::path::Path) -> bool {
         .and_then(|v| v.as_object())
         .map(|servers| servers.contains_key(MCP_SERVER_NAME))
         .unwrap_or(false)
+}
+
+#[tauri::command]
+pub async fn get_repo_graph() -> Result<repo_edges::RepoGraph, String> {
+    blocking(repo_edges::full_graph).await
+}
+
+#[tauri::command]
+pub async fn bulk_delete_memories(ids: Vec<String>) -> Result<usize, String> {
+    blocking(move || memories::bulk_delete(&ids)).await
+}
+
+#[tauri::command]
+pub async fn list_memories_since(since_ts: i64, limit: Option<usize>) -> Result<Vec<memories::Memory>, String> {
+    blocking(move || memories::list_since(since_ts, limit.unwrap_or(100))).await
 }

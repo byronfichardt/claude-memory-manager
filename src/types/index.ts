@@ -134,6 +134,24 @@ export interface RelatedMemoriesResponse {
   related: RelatedMemoryEntry[];
 }
 
+export interface RepoEdge {
+  id: number;
+  source_repo: string;
+  target_repo: string;
+  relationship_type: string;
+  evidence: string;
+  weight: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface RepoGraph {
+  nodes: string[];
+  edges: RepoEdge[];
+}
+
+export type DateFilter = "all" | "7d" | "30d" | "90d";
+
 export interface OrganizerReport {
   classified_count: number;
   new_topics_created: string[];

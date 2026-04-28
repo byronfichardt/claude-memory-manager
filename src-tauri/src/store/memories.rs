@@ -194,6 +194,26 @@ pub fn delete(id: &str) -> Result<(), String> {
     })
 }
 
+pub fn bulk_delete(ids: &[String]) -> Result<usize, String> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    for id in ids {
+        flag_dependents_for_review(id);
+    }
+    with_conn(|conn| {
+        let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "DELETE FROM memories WHERE id IN ({})",
+            placeholders.join(", ")
+        );
+        let count = conn
+            .execute(&sql, rusqlite::params_from_iter(ids.iter()))
+            .map_err(|e| format!("bulk_delete: {}", e))?;
+        Ok(count)
+    })
+}
+
 pub fn list_all() -> Result<Vec<Memory>, String> {
     with_conn(|conn| {
         let mut stmt = conn
@@ -233,6 +253,25 @@ pub fn list_untopiced() -> Result<Vec<Memory>, String> {
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], row_to_memory)
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    })
+}
+
+/// List memories created/updated within a time window (unix timestamps).
+pub fn list_since(since_ts: i64, limit: usize) -> Result<Vec<Memory>, String> {
+    with_conn(|conn| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT * FROM memories WHERE updated_at >= ?1 ORDER BY updated_at DESC LIMIT ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![since_ts, limit as i64], row_to_memory)
             .map_err(|e| e.to_string())?;
         let mut out = Vec::new();
         for r in rows {

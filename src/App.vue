@@ -34,6 +34,10 @@ function goSettings() {
   router.push({ name: "settings" });
 }
 
+function goGraph() {
+  router.push({ name: "graph" });
+}
+
 function onSearchSubmit() {
   const q = searchInput.value.trim();
   if (!q) return;
@@ -74,6 +78,21 @@ function onSearchClear() {
           ×
         </button>
       </form>
+
+      <button
+        class="icon-btn"
+        :class="{ 'is-active': route.name === 'graph' }"
+        title="Repo Graph"
+        @click="goGraph"
+      >
+        <svg viewBox="0 0 16 16" fill="currentColor" class="icon">
+          <circle cx="3.5" cy="8" r="2" />
+          <circle cx="12.5" cy="3" r="2" />
+          <circle cx="12.5" cy="13" r="2" />
+          <line x1="5.4" y1="7.1" x2="10.6" y2="4.1" stroke="currentColor" stroke-width="1.25" />
+          <line x1="5.4" y1="8.9" x2="10.6" y2="11.9" stroke="currentColor" stroke-width="1.25" />
+        </svg>
+      </button>
 
       <button
         class="icon-btn"

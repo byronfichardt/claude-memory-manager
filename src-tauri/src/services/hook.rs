@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 
 use crate::services::project;
-use crate::store::{self, edges, memories};
+use crate::store::{self, edges, memories, repo_edges};
 
 const MAX_RESULTS: u32 = 5;
 const MAX_SNIPPET_CHARS: usize = 300;
@@ -139,6 +139,36 @@ pub fn run() -> Result<(), String> {
         }
 
         out.push_str("</memory-context>\n");
+
+        // Inject cross-repo context when the current project has known dependencies.
+        if let Some(ref project_path) = active_project {
+            let repo_str = project_path.to_string_lossy();
+            if let Ok(dep_edges) = repo_edges::dependencies_of(&repo_str) {
+                if !dep_edges.is_empty() {
+                    out.push_str("<repo-relationship-context>\n");
+                    out.push_str(&format!(
+                        "This repo ({}) has recorded dependencies on:\n",
+                        project_path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| repo_str.to_string()),
+                    ));
+                    for edge in &dep_edges {
+                        out.push_str(&format!(
+                            "  --[{}]--> {} ({})\n",
+                            edge.relationship_type,
+                            std::path::Path::new(&edge.target_repo)
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| edge.target_repo.clone()),
+                            edge.evidence,
+                        ));
+                    }
+                    out.push_str("Use repo_graph to see the full picture. Use repo_link to record new dependencies you discover.\n");
+                    out.push_str("</repo-relationship-context>\n");
+                }
+            }
+        }
 
         // Strengthen co-access edges between results — one batched upsert
         // inside a single transaction instead of 2×N² sequential writes.
@@ -341,6 +371,13 @@ Before replying, scan this turn for memory-worthy signals:
 - non-obvious project fact, debugging gotcha + fix, or architecture decision + rationale
 - project state change (status, ownership, deadlines)
 If any apply, call memory_add NOW — do not batch to end of session. Saves are cheap; reconstructing lost context is not.
+
+Repo relationship signals — call repo_link if you notice:
+- An HTTP client or service class in this repo that calls another service's URL
+- An imported SDK, client library, or package from another internal repo
+- A shared database schema or API contract between two repos
+- Any env var like OTHER_SERVICE_URL that points to a sibling service
+Record these once; they build the cross-repo graph automatically over time.
 </memory-save-checklist>";
 
 /// Heuristic detector for correction/pushback signals in a user prompt.

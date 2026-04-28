@@ -59,6 +59,9 @@ pub fn run() {
             commands::autopilot::uninstall_everything,
             commands::autopilot::export_memories,
             commands::autopilot::import_memories,
+            commands::autopilot::get_repo_graph,
+            commands::autopilot::bulk_delete_memories,
+            commands::autopilot::list_memories_since,
         ])
         .setup(|app| {
             // On macOS, set as accessory app so it doesn't appear in the Dock

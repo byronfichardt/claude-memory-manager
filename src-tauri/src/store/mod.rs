@@ -1,6 +1,7 @@
 pub mod edges;
 pub mod history;
 pub mod memories;
+pub mod repo_edges;
 pub mod settings;
 pub mod topics;
 
@@ -283,7 +284,41 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
             .map_err(|e| format!("bump v4: {}", e))?;
     }
 
+    if version < 5 {
+        apply_migration_v5(conn)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (5)", [])
+            .map_err(|e| format!("bump v5: {}", e))?;
+    }
+
     Ok(())
+}
+
+fn apply_migration_v5(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        -- Repo-level relationship graph: service/project dependency edges
+        -- Built organically by Claude as it notices inter-service dependencies.
+        CREATE TABLE IF NOT EXISTS repo_edges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_repo TEXT NOT NULL,
+            target_repo TEXT NOT NULL,
+            relationship_type TEXT NOT NULL DEFAULT 'calls',
+            evidence TEXT NOT NULL DEFAULT '',
+            weight REAL NOT NULL DEFAULT 1.0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(source_repo, target_repo, relationship_type)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_repo_edges_source ON repo_edges(source_repo);
+        CREATE INDEX IF NOT EXISTS idx_repo_edges_target ON repo_edges(target_repo);
+
+        -- Config path for multi-config scoping (which ~/.claude* dir owns this memory)
+        ALTER TABLE memories ADD COLUMN config_path TEXT;
+        CREATE INDEX IF NOT EXISTS idx_memories_config ON memories(config_path);
+        "#,
+    )
+    .map_err(|e| format!("migration v5: {}", e))
 }
 
 fn apply_migration_v3(conn: &Connection) -> Result<(), String> {
