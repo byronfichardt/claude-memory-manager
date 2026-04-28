@@ -189,6 +189,15 @@ export interface ExportSummary {
 
 export type ImportMode = "merge" | "replace";
 
+export interface EmbeddingStatus {
+  enabled: boolean;
+  is_downloading: boolean;
+  model_ready: boolean;
+  indexed_count: number;
+  total_count: number;
+  is_sweeping: boolean;
+}
+
 export interface ImportReport {
   memories_added: number;
   memories_skipped: number;

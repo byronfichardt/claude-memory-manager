@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, watch } from "vue";
+import { ref, onMounted, onUnmounted, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useAppStore } from "@/stores/app";
 import { useTauri } from "@/composables/useTauri";
@@ -12,6 +12,7 @@ import type {
   ExportSummary,
   ImportReport,
   ImportMode,
+  EmbeddingStatus,
 } from "@/types";
 
 const router = useRouter();
@@ -207,10 +208,6 @@ function formatBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
-onMounted(() => {
-  app.loadStatus();
-});
-
 async function registerMcp() {
   working.value = true;
   try {
@@ -292,6 +289,82 @@ async function undoLast() {
   } catch {
     /* error is in store */
   }
+}
+
+// ── Semantic search ────────────────────────────────────────────────────────────
+
+const embeddingStatus = ref<EmbeddingStatus | null>(null);
+const embeddingToggeling = ref(false);
+let embeddingPollTimer: ReturnType<typeof setInterval> | null = null;
+
+async function refreshEmbeddingStatus() {
+  try {
+    embeddingStatus.value = await tauri.getEmbeddingStatus();
+  } catch {
+    /* silently ignore — feature may not be available */
+  }
+}
+
+async function toggleSemanticSearch() {
+  if (embeddingToggeling.value) return;
+  embeddingToggeling.value = true;
+  try {
+    if (embeddingStatus.value?.enabled) {
+      await tauri.disableSemanticSearch();
+    } else {
+      await tauri.enableSemanticSearch();
+    }
+    await refreshEmbeddingStatus();
+    startEmbeddingPolling();
+  } catch (e) {
+    app.error = String(e);
+  } finally {
+    embeddingToggeling.value = false;
+  }
+}
+
+function startEmbeddingPolling() {
+  if (embeddingPollTimer) return;
+  embeddingPollTimer = setInterval(async () => {
+    await refreshEmbeddingStatus();
+    const s = embeddingStatus.value;
+    if (s && !s.is_downloading && !s.is_sweeping) {
+      clearInterval(embeddingPollTimer!);
+      embeddingPollTimer = null;
+    }
+  }, 2000);
+}
+
+onMounted(async () => {
+  app.loadStatus();
+  await refreshEmbeddingStatus();
+  if (embeddingStatus.value?.is_downloading || embeddingStatus.value?.is_sweeping) {
+    startEmbeddingPolling();
+  }
+});
+
+onUnmounted(() => {
+  if (embeddingPollTimer) {
+    clearInterval(embeddingPollTimer);
+    embeddingPollTimer = null;
+  }
+});
+
+function embeddingStatusLabel(s: EmbeddingStatus): string {
+  if (s.is_downloading) return "Downloading model (~275 MB)…";
+  if (!s.model_ready && s.enabled) return "Initializing model…";
+  if (s.is_sweeping) return `Indexing ${s.indexed_count} / ${s.total_count} memories…`;
+  if (s.model_ready && s.indexed_count < s.total_count)
+    return `${s.indexed_count} / ${s.total_count} indexed — sweep complete`;
+  if (s.model_ready) return `Ready · ${s.total_count} memories indexed`;
+  return "Disabled";
+}
+
+function embeddingStatusClass(s: EmbeddingStatus): string {
+  if (!s.enabled) return "";
+  if (s.is_downloading || s.is_sweeping) return "live";
+  if (s.model_ready) return "ok";
+  return "";
 }
 
 function goHome() {
@@ -788,6 +861,54 @@ function goHome() {
             </button>
           </div>
         </div>
+      </div>
+    </section>
+
+    <!-- Semantic search -->
+    <section class="section">
+      <h2 class="section-title">Semantic search</h2>
+
+      <div class="card">
+        <div class="row">
+          <div class="row-main">
+            <div class="label">Local embedding model</div>
+            <p class="sub">
+              Enable to download <strong>nomic-embed-text-v1.5</strong> (~275 MB) and index
+              all memories locally. Searches become semantic rather than keyword-only.
+              The hook and MCP server continue using fast keyword search — semantic
+              results are GUI-only.
+            </p>
+            <div v-if="embeddingStatus" class="sub" style="margin-top: 0.375rem;">
+              <span
+                class="status-line"
+                :class="embeddingStatusClass(embeddingStatus)"
+              >
+                <span
+                  class="status-dot"
+                  :class="{ pulse: embeddingStatus.is_downloading || embeddingStatus.is_sweeping }"
+                ></span>
+                {{ embeddingStatusLabel(embeddingStatus) }}
+              </span>
+            </div>
+          </div>
+          <button
+            class="toggle"
+            :class="{ 'is-on': embeddingStatus?.enabled }"
+            :aria-pressed="!!embeddingStatus?.enabled"
+            :disabled="embeddingToggeling"
+            aria-label="Toggle semantic search"
+            @click="toggleSemanticSearch"
+          >
+            <span class="toggle-knob"></span>
+          </button>
+        </div>
+      </div>
+
+      <div v-if="embeddingStatus?.enabled && !embeddingStatus.model_ready && !embeddingStatus.is_downloading" class="card muted">
+        <p class="sub">
+          Model download may still be in progress in the background. The status above
+          will update automatically when indexing begins.
+        </p>
       </div>
     </section>
 

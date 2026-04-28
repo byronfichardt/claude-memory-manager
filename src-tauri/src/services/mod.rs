@@ -1,5 +1,6 @@
 pub mod bootstrap;
 pub mod claude_api;
+pub mod embeddings;
 pub mod frontmatter;
 pub mod hook;
 pub mod ingestion;

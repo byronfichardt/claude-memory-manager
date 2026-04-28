@@ -17,6 +17,7 @@ import type {
   ImportMode,
   ImportReport,
   RepoGraph,
+  EmbeddingStatus,
 } from "@/types";
 
 export function useTauri() {
@@ -115,5 +116,11 @@ export function useTauri() {
         sinceTs: Math.floor(sinceTsMs / 1000),
         limit,
       }),
+
+    // Semantic search (embedding management)
+    getEmbeddingStatus: () => invoke<EmbeddingStatus>("get_embedding_status"),
+    enableSemanticSearch: () => invoke<void>("enable_semantic_search"),
+    disableSemanticSearch: () => invoke<void>("disable_semantic_search"),
+    triggerEmbeddingSweep: () => invoke<void>("trigger_embedding_sweep"),
   };
 }

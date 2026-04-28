@@ -5,7 +5,7 @@ use crate::services::installer::{
     self, ConfigDirRegistration, SetupResult, UninstallReport, MCP_SERVER_NAME,
     SETTING_CUSTOM_DB_DIR, SETTING_HOOK_ENABLED,
 };
-use crate::services::{bootstrap, organizer, portable};
+use crate::services::{bootstrap, embeddings, organizer, portable};
 use crate::store::{edges, history, memories, repo_edges, settings, topics};
 
 const SETTING_AUTO_ORGANIZE: &str = "auto_organize";
@@ -515,4 +515,28 @@ pub async fn bulk_delete_memories(ids: Vec<String>) -> Result<usize, String> {
 #[tauri::command]
 pub async fn list_memories_since(since_ts: i64, limit: Option<usize>) -> Result<Vec<memories::Memory>, String> {
     blocking(move || memories::list_since(since_ts, limit.unwrap_or(100))).await
+}
+
+#[tauri::command]
+pub async fn get_embedding_status() -> Result<embeddings::EmbeddingStatus, String> {
+    blocking(|| Ok(embeddings::get_status())).await
+}
+
+#[tauri::command]
+pub async fn enable_semantic_search() -> Result<(), String> {
+    blocking(embeddings::enable).await
+}
+
+#[tauri::command]
+pub async fn disable_semantic_search() -> Result<(), String> {
+    blocking(embeddings::disable).await
+}
+
+#[tauri::command]
+pub async fn trigger_embedding_sweep() -> Result<(), String> {
+    blocking(|| {
+        embeddings::trigger_sweep();
+        Ok(())
+    })
+    .await
 }

@@ -168,6 +168,16 @@ fn migrate_from_old_locations(new_dir: &std::path::Path) {
 static POOL: OnceLock<Pool<SqliteConnectionManager>> = OnceLock::new();
 
 pub fn init() -> Result<(), String> {
+    // Register sqlite-vec for all SQLite connections in this process.
+    // Must happen before any connections are created so every pool connection
+    // and hook connection picks up the vec0 virtual table module automatically.
+    // SAFETY: sqlite3_vec_init is a valid SQLite auto-extension entry point.
+    unsafe {
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+            sqlite_vec::sqlite3_vec_init as *const (),
+        )));
+    }
+
     let pool = build_pool().map_err(|e| {
         record_startup_error(format!("DB init failed: {}", e));
         e
@@ -290,7 +300,23 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
             .map_err(|e| format!("bump v5: {}", e))?;
     }
 
+    if version < 6 {
+        apply_migration_v6(conn)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (6)", [])
+            .map_err(|e| format!("bump v6: {}", e))?;
+    }
+
     Ok(())
+}
+
+fn apply_migration_v6(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(
+            memory_id TEXT PRIMARY KEY,
+            embedding float[768]
+        );",
+    )
+    .map_err(|e| format!("migration v6: {}", e))
 }
 
 fn apply_migration_v5(conn: &Connection) -> Result<(), String> {

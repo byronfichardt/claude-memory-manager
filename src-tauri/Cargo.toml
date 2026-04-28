@@ -27,7 +27,9 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = ["process", "rt"] }
-rusqlite = { version = "0.32", features = ["bundled", "functions"] }
+rusqlite = { version = "0.32", features = ["bundled", "functions", "vtab"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.25"
 sha2 = "0.10"
+fastembed = "4"
+sqlite-vec = "0.1.1"

@@ -62,6 +62,10 @@ pub fn run() {
             commands::autopilot::get_repo_graph,
             commands::autopilot::bulk_delete_memories,
             commands::autopilot::list_memories_since,
+            commands::autopilot::get_embedding_status,
+            commands::autopilot::enable_semantic_search,
+            commands::autopilot::disable_semantic_search,
+            commands::autopilot::trigger_embedding_sweep,
         ])
         .setup(|app| {
             // On macOS, set as accessory app so it doesn't appear in the Dock
@@ -124,6 +128,10 @@ pub fn run() {
             std::thread::spawn(|| {
                 services::installer::maybe_auto_bootstrap();
             });
+
+            // Start background model download + sweep if semantic search was
+            // previously enabled. No-op when disabled (the default).
+            services::embeddings::maybe_init_on_startup();
 
             Ok(())
         })
