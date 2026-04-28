@@ -1,0 +1,11 @@
+{
+  "version": "0.3.0",
+  "notes": "Semantic search (local embedding model), repo relationship graph, timeline date filter, batch delete",
+  "pub_date": "2026-04-28T20:22:45Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRHZabGRHc1N0R092ekRFeW9aazdvVmR4N1QvNVEzcDc2OS9VN05BN1VwTHY0TndEVzZKZGFsWlV4TlFsTnBHMzlnRFN6VE9mZzhUT3dyWENmWFpmc2dFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc3NDA3NzMzCWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKOTVjeERqRFYrbC9CT1lxeXViY01SL04rR0JXVEdpSXZKRElsSkdSaWRsZllPeFVjWlRZSWNZVS84cThPMWxkZ1RsL1g5dC9hSEhBSXNZMGNnT25EQnc9PQo=",
+      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.3.0/Claude.Memory.Manager.app.tar.gz"
+    }
+  }
+}
