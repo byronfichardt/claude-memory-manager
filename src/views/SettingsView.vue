@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from "vue";
+import { ref, markRaw, onMounted, onUnmounted, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useAppStore } from "@/stores/app";
 import { useTauri } from "@/composables/useTauri";
@@ -152,7 +152,7 @@ async function checkForUpdates() {
       updateState.value = { kind: "up-to-date" };
       return;
     }
-    pendingUpdate.value = update;
+    pendingUpdate.value = markRaw(update);
     updateState.value = {
       kind: "available",
       version: update.version,
