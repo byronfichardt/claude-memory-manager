@@ -2,7 +2,7 @@ use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{edges, settings, with_conn};
+use super::{edges, settings, topics, with_conn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Memory {
@@ -81,6 +81,11 @@ pub fn insert_with_conn(conn: &Connection, new: NewMemory) -> Result<Memory, Str
 
     if let Some(existing) = find_by_hash(conn, &hash)? {
         return Ok(existing);
+    }
+
+    // Auto-create topic if provided — the FK constraint requires it to exist.
+    if let Some(ref t) = new.topic {
+        topics::ensure_with_conn(conn, t, None, None)?;
     }
 
     let id = uuid::Uuid::new_v4().to_string();

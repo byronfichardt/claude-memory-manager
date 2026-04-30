@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicehash/tauri/refs/heads/dev/crates/tauri-utils/schema.json",
   "productName": "Claude Memory Manager",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "identifier": "com.claude-memory-manager.app",
   "build": {
     "frontendDist": "../dist",

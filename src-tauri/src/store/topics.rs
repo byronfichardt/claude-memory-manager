@@ -18,19 +18,27 @@ fn now_ts() -> i64 {
 
 /// Insert a topic if not present (upsert by name).
 pub fn ensure(name: &str, description: Option<&str>, color: Option<&str>) -> Result<(), String> {
-    with_conn(|conn| {
-        let now = now_ts();
-        conn.execute(
-            r#"INSERT INTO topics (name, description, color, created_at)
-               VALUES (?1, ?2, ?3, ?4)
-               ON CONFLICT(name) DO UPDATE SET
-                 description = COALESCE(excluded.description, topics.description),
-                 color = COALESCE(excluded.color, topics.color)"#,
-            params![name, description, color, now],
-        )
-        .map_err(|e| format!("ensure topic: {}", e))?;
-        Ok(())
-    })
+    with_conn(|conn| ensure_with_conn(conn, name, description, color))
+}
+
+/// Connection-owning variant — use when you already hold a connection.
+pub fn ensure_with_conn(
+    conn: &rusqlite::Connection,
+    name: &str,
+    description: Option<&str>,
+    color: Option<&str>,
+) -> Result<(), String> {
+    let now = now_ts();
+    conn.execute(
+        r#"INSERT INTO topics (name, description, color, created_at)
+           VALUES (?1, ?2, ?3, ?4)
+           ON CONFLICT(name) DO UPDATE SET
+             description = COALESCE(excluded.description, topics.description),
+             color = COALESCE(excluded.color, topics.color)"#,
+        params![name, description, color, now],
+    )
+    .map_err(|e| format!("ensure topic: {}", e))?;
+    Ok(())
 }
 
 /// List all topics with their memory counts.
