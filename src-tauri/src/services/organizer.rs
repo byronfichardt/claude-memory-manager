@@ -36,6 +36,7 @@ const SETTING_LAST_ORGANIZE_TS: &str = "last_organize_ts";
 const SETTING_INITIAL_RELATE_DONE: &str = "initial_relate_done";
 pub const SETTING_SPLIT_THRESHOLD: &str = "split_threshold";
 const SETTING_SPLIT_LAST_SIZE_PREFIX: &str = "split_last_size:";
+const SETTING_SPLIT_LAST_THRESHOLD_PREFIX: &str = "split_last_threshold:";
 
 const CLASSIFY_BATCH_SIZE: usize = 25;
 const CLASSIFY_MAX_CONTENT: usize = 300;
@@ -439,7 +440,7 @@ pub async fn split_oversized_topics(
     let candidates: Vec<&topics::Topic> = all_topics
         .iter()
         .filter(|t| (t.memory_count as usize) >= threshold)
-        .filter(|t| should_reevaluate_split(&t.name, t.memory_count as usize))
+        .filter(|t| should_reevaluate_split(&t.name, t.memory_count as usize, threshold))
         .collect();
 
     if candidates.is_empty() {
@@ -471,9 +472,9 @@ pub async fn split_oversized_topics(
                 .push(format!("evaluate split {}: {}", topic.name, e)),
         }
 
-        // Record the size we evaluated at, so we don't re-ask until the topic
-        // grows past the growth ratio. Applies whether we split or not.
-        record_split_size(&topic.name, mems.len());
+        // Record the size and threshold we evaluated at, so we don't re-ask
+        // until the topic grows past the growth ratio OR threshold is lowered.
+        record_split_evaluation(&topic.name, mems.len(), threshold);
     }
 
     Ok(())
@@ -486,21 +487,37 @@ fn load_split_threshold() -> usize {
         .unwrap_or(SPLIT_DEFAULT_THRESHOLD)
 }
 
-fn should_reevaluate_split(topic: &str, current_size: usize) -> bool {
-    let key = format!("{}{}", SETTING_SPLIT_LAST_SIZE_PREFIX, topic);
-    let last: usize = settings::get(&key, "0")
+fn should_reevaluate_split(topic: &str, current_size: usize, current_threshold: usize) -> bool {
+    let size_key = format!("{}{}", SETTING_SPLIT_LAST_SIZE_PREFIX, topic);
+    let last_size: usize = settings::get(&size_key, "0")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    if last == 0 {
+
+    if last_size == 0 {
+        return true; // never evaluated
+    }
+
+    // If threshold was lowered since last eval, force a fresh look.
+    let thresh_key = format!("{}{}", SETTING_SPLIT_LAST_THRESHOLD_PREFIX, topic);
+    let last_threshold: usize = settings::get(&thresh_key, "0")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(usize::MAX);
+
+    if current_threshold < last_threshold {
         return true;
     }
-    current_size as f64 >= (last as f64) * SPLIT_GROWTH_RATIO
+
+    // Otherwise gate on meaningful growth.
+    current_size as f64 >= (last_size as f64) * SPLIT_GROWTH_RATIO
 }
 
-fn record_split_size(topic: &str, size: usize) {
-    let key = format!("{}{}", SETTING_SPLIT_LAST_SIZE_PREFIX, topic);
-    let _ = settings::set(&key, &size.to_string());
+fn record_split_evaluation(topic: &str, size: usize, threshold: usize) {
+    let size_key = format!("{}{}", SETTING_SPLIT_LAST_SIZE_PREFIX, topic);
+    let thresh_key = format!("{}{}", SETTING_SPLIT_LAST_THRESHOLD_PREFIX, topic);
+    let _ = settings::set(&size_key, &size.to_string());
+    let _ = settings::set(&thresh_key, &threshold.to_string());
 }
 
 async fn evaluate_split(
@@ -642,12 +659,14 @@ fn apply_split(
         let _ = topics::delete_empty(original_topic);
     }
 
-    // Reset size tracking for each new sub-topic so its own growth curve starts
-    // fresh — otherwise a new sub-topic would inherit the original's threshold.
+    // Reset size+threshold tracking for each new sub-topic so its own growth
+    // curve starts fresh — otherwise a new sub-topic would inherit the
+    // original's threshold and immediately qualify for re-evaluation.
+    let current_threshold = load_split_threshold();
     for (name, _, _) in &normalized {
         if name != original_topic {
             let sub_size = memories::list_by_topic(name)?.len();
-            record_split_size(name, sub_size);
+            record_split_evaluation(name, sub_size, current_threshold);
         }
     }
 
@@ -1058,10 +1077,10 @@ fn undo_split(snapshot: &serde_json::Value) -> Result<(), String> {
         }
     }
 
-    // Restore the original's size tracker so the split phase doesn't
+    // Restore the original's size+threshold tracker so the split phase doesn't
     // immediately re-propose the same split on the next pass.
     let current_size = memories::list_by_topic(original_topic)?.len();
-    record_split_size(original_topic, current_size);
+    record_split_evaluation(original_topic, current_size, load_split_threshold());
 
     Ok(())
 }
