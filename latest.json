@@ -1,11 +1,11 @@
 {
-  "version": "0.3.2",
-  "notes": "Fix split threshold not being respected when lowered — topics now re-evaluate immediately when threshold decreases",
-  "pub_date": "2026-04-30T10:27:56Z",
+  "version": "0.3.3",
+  "notes": "Show organizer errors in UI so failures are visible; add unit tests for split threshold logic",
+  "pub_date": "2026-04-30T10:42:39Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRGliUVREUk5IUHlMME1PVlp1R05YVlFNd1ZXaXlOYWxGUEdsWnNxcWZqYkZWSk8yRFpJMGtDUU1MOGVVTWpiMXMwVzVDUlhxZFNmdzNraExrRnE4U3d3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc3NTQxNjc2CWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKamdMdG9VbnA4Y3d1dnlpbXY2NHhyaWtpcUlhNFNJdmFza3JpT2Rid0JXS2xGK0ZSR1lUaytoNTJSWHcyb0EyeGRJekpxYUVBemNvQytWTytONzFhREE9PQo=",
-      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.3.2/Claude.Memory.Manager.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRGpiL1RsckE0Sm5XN0RqOHlObldza1BwTGRkNEo5WlNsbjdlUnowYnhidFJzZGFtWWVUYkllWGNYdjlxZHJESnBLQ2N4ZXBzNUhqU1RmYkFnRUhUblFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc3NTQyNTU5CWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKSXc2d0h5YncvczBCQWJxaTdYZS9yTGtIeDlLRlFiYUlFeVJyUGtjU0JhaUxBY0tCV3lMenVLNXRSS1F1blBzYmttYVBnRzlyV3pXY3N1Zm5MQ29iQmc9PQo=",
+      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.3.3/Claude.Memory.Manager.app.tar.gz"
     }
   }
 }
