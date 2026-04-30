@@ -840,6 +840,12 @@ function goHome() {
                 merged <span class="num">{{ app.lastOrganizeReport.merged_count }}</span><template v-if="app.lastOrganizeReport.new_topics_created.length">,
                 {{ app.lastOrganizeReport.new_topics_created.length }} new topic<template v-if="app.lastOrganizeReport.new_topics_created.length !== 1">s</template></template><template v-if="app.lastOrganizeReport.split_topics?.length">,
                 split <span class="num">{{ app.lastOrganizeReport.split_topics.length }}</span> topic<template v-if="app.lastOrganizeReport.split_topics.length !== 1">s</template></template>.
+                <template v-if="app.lastOrganizeReport.errors?.length">
+                  <span class="organize-errors">
+                    {{ app.lastOrganizeReport.errors.length }} error{{ app.lastOrganizeReport.errors.length === 1 ? '' : 's' }}:
+                    {{ app.lastOrganizeReport.errors.join(' | ') }}
+                  </span>
+                </template>
               </span>
               <span v-else>Run a classification and dedup pass right now.</span>
             </div>
@@ -1160,6 +1166,7 @@ function goHome() {
 .status-line.ok { color: var(--color-health-ok); }
 .status-line.warn { color: var(--color-health-warning); }
 .status-line.live { color: var(--color-accent); }
+.organize-errors { color: var(--color-health-error); display: block; margin-top: 0.25rem; font-size: 0.8em; }
 .status-dot {
   width: 0.375rem;
   height: 0.375rem;

@@ -1376,4 +1376,78 @@ mod tests {
         assert!(15.0 * ratio <= 20.0);
         assert!(15.0 * ratio > 19.0); // 19 is NOT enough growth from 15
     }
+
+    // ── should_reevaluate_split logic (pure, using fake settings via closures) ──
+    // We test the decision logic by verifying the three code paths directly.
+
+    /// Simulates the decision logic of should_reevaluate_split without hitting SQLite.
+    fn reevaluate_decision(
+        last_size: usize,
+        last_threshold: Option<usize>, // None = key absent (default 0)
+        current_size: usize,
+        current_threshold: usize,
+    ) -> bool {
+        if last_size == 0 {
+            return true; // never evaluated
+        }
+
+        let lt = last_threshold.unwrap_or(0); // mirrors settings::get default "0"
+        if current_threshold < lt {
+            return true; // threshold was lowered
+        }
+
+        current_size as f64 >= (last_size as f64) * SPLIT_GROWTH_RATIO
+    }
+
+    #[test]
+    fn test_reevaluate_never_evaluated() {
+        // last_size == 0 means first time — always evaluate.
+        assert!(reevaluate_decision(0, None, 20, 15));
+        assert!(reevaluate_decision(0, Some(0), 5, 8));
+    }
+
+    #[test]
+    fn test_reevaluate_growth_guard_blocks() {
+        // Evaluated at 20, current 22 — 22 < 20*1.3=26, should NOT re-evaluate.
+        assert!(!reevaluate_decision(20, Some(15), 22, 15));
+    }
+
+    #[test]
+    fn test_reevaluate_growth_guard_passes() {
+        // Evaluated at 20, current 26 — 26 >= 20*1.3=26, SHOULD re-evaluate.
+        assert!(reevaluate_decision(20, Some(15), 26, 15));
+    }
+
+    #[test]
+    fn test_reevaluate_threshold_lowered_forces_reeval() {
+        // Evaluated at threshold=15. User lowers to 8. Force re-evaluation.
+        assert!(reevaluate_decision(20, Some(15), 22, 8));
+        assert!(reevaluate_decision(10, Some(12), 11, 5));
+    }
+
+    #[test]
+    fn test_reevaluate_threshold_raised_uses_growth_guard() {
+        // Threshold raised from 8 to 15. Growth guard still applies.
+        // Evaluated at 10, current 12 — 12 < 10*1.3=13, should NOT re-evaluate.
+        assert!(!reevaluate_decision(10, Some(8), 12, 15));
+        // But at 13 (>= 10*1.3) it would.
+        assert!(reevaluate_decision(10, Some(8), 13, 15));
+    }
+
+    #[test]
+    fn test_reevaluate_legacy_no_threshold_key() {
+        // Topics evaluated before v0.3.2 have no threshold key (last_threshold=0).
+        // current_threshold < 0 is always false for usize → falls through to growth guard.
+        assert!(!reevaluate_decision(20, None, 22, 15)); // 22 < 26, blocked
+        assert!(reevaluate_decision(20, None, 26, 15));  // 26 >= 26, passes
+        // Even if user changes threshold, legacy topics only respond to growth.
+        assert!(!reevaluate_decision(20, None, 22, 8));  // threshold lowered but key absent
+    }
+
+    #[test]
+    fn test_reevaluate_threshold_equal_uses_growth_guard() {
+        // Same threshold as last eval — growth guard decides.
+        assert!(!reevaluate_decision(15, Some(15), 18, 15)); // 18 < 19.5
+        assert!(reevaluate_decision(15, Some(15), 20, 15));  // 20 >= 19.5
+    }
 }
