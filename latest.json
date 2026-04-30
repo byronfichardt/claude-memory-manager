@@ -1,11 +1,11 @@
 {
-  "version": "0.3.3",
-  "notes": "Show organizer errors in UI so failures are visible; add unit tests for split threshold logic",
-  "pub_date": "2026-04-30T10:42:39Z",
+  "version": "0.3.4",
+  "notes": "Fix TypeError crash when installing updates (markRaw fix for Tauri Update object)",
+  "pub_date": "2026-04-30T11:16:48Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRGpiL1RsckE0Sm5XN0RqOHlObldza1BwTGRkNEo5WlNsbjdlUnowYnhidFJzZGFtWWVUYkllWGNYdjlxZHJESnBLQ2N4ZXBzNUhqU1RmYkFnRUhUblFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc3NTQyNTU5CWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKSXc2d0h5YncvczBCQWJxaTdYZS9yTGtIeDlLRlFiYUlFeVJyUGtjU0JhaUxBY0tCV3lMenVLNXRSS1F1blBzYmttYVBnRzlyV3pXY3N1Zm5MQ29iQmc9PQo=",
-      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.3.3/Claude.Memory.Manager.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRG92T1lvWitEbFMvbjVKVXZpN0xadEt2UGlDWU1uOHNiSVNKSlU2MWF1NEp1VEhUZ2lxR2FLU2dXeTlkTngvTEU2OWpKckcrY0NkTlZMZ3ljWllQQndrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc3NTQ0NjA4CWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKUEdzQ1BpR095YlU4bkxVM3BJUkxxdGlmZkNpTitkZ3RsYzJveTNqS3pqN2UyNCt6RlZYTXNORGVUTzBNU0Y4ZS94MlZrWnRIakFtWXVEcDZIcUs2Qnc9PQo=",
+      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.3.4/Claude.Memory.Manager.app.tar.gz"
     }
   }
 }
