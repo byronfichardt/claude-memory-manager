@@ -235,8 +235,8 @@ pub fn unregister_mcp_server() -> Result<Vec<ConfigDirRegistration>, String> {
 // Organizer commands
 
 #[tauri::command]
-pub async fn run_organize_pass(app: tauri::AppHandle) -> Result<organizer::OrganizerReport, String> {
-    organizer::run_full_pass(Some(app)).await
+pub async fn run_organize_pass(app: tauri::AppHandle, force: Option<bool>) -> Result<organizer::OrganizerReport, String> {
+    organizer::run_full_pass(Some(app), force.unwrap_or(false)).await
 }
 
 /// Run ONLY the topic consolidation phase. Useful for cleaning up an already-classified store.

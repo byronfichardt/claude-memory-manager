@@ -179,7 +179,7 @@ export const useAppStore = defineStore("app", () => {
     }
   }
 
-  async function runOrganize() {
+  async function runOrganize(force = false) {
     if (organizing.value) return;
     organizing.value = true;
     organizeProgress.value = {
@@ -190,7 +190,7 @@ export const useAppStore = defineStore("app", () => {
     };
     error.value = null;
     try {
-      lastOrganizeReport.value = await tauri.runOrganizePass();
+      lastOrganizeReport.value = await tauri.runOrganizePass(force);
       await loadStatus();
       await loadTopics();
     } catch (e) {

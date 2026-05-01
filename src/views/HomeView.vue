@@ -79,7 +79,7 @@ async function connectClaude() {
 
 async function organizeNow() {
   try {
-    await app.runOrganize();
+    await app.runOrganize(true);
   } catch {
     /* error is in store */
   }

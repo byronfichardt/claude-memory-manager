@@ -227,7 +227,9 @@ struct SplitSubTopic {
 /// then consolidate overlapping topics.
 ///
 /// Only dedup/consolidate run on topics that changed since the last pass.
-pub async fn run_full_pass(handle: Option<AppHandle>) -> Result<OrganizerReport, String> {
+/// When `force` is true, the split growth guard is bypassed so every over-threshold
+/// topic is re-evaluated regardless of how recently it was last checked.
+pub async fn run_full_pass(handle: Option<AppHandle>, force: bool) -> Result<OrganizerReport, String> {
     let h = handle.as_ref();
     let mut report = OrganizerReport::default();
     let client = ClaudeClient::new(None);
@@ -281,7 +283,8 @@ pub async fn run_full_pass(handle: Option<AppHandle>) -> Result<OrganizerReport,
 
     // Phase 4: split oversized topics. Runs every pass — the per-topic
     // growth guard keeps cost bounded when nothing has changed meaningfully.
-    match split_oversized_topics(h, &client, &mut report).await {
+    // `force` bypasses the guard so a manual Organize always gets a fresh look.
+    match split_oversized_topics(h, &client, &mut report, force).await {
         Ok(()) => {}
         Err(e) => report.errors.push(format!("split: {}", e)),
     }
@@ -433,6 +436,7 @@ pub async fn split_oversized_topics(
     handle: Option<&AppHandle>,
     client: &ClaudeClient,
     report: &mut OrganizerReport,
+    force: bool,
 ) -> Result<(), String> {
     let threshold = load_split_threshold();
     let all_topics = topics::list_all()?;
@@ -440,7 +444,7 @@ pub async fn split_oversized_topics(
     let candidates: Vec<&topics::Topic> = all_topics
         .iter()
         .filter(|t| (t.memory_count as usize) >= threshold)
-        .filter(|t| should_reevaluate_split(&t.name, t.memory_count as usize, threshold))
+        .filter(|t| force || should_reevaluate_split(&t.name, t.memory_count as usize, threshold))
         .collect();
 
     if candidates.is_empty() {

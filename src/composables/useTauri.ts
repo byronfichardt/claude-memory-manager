@@ -83,7 +83,7 @@ export function useTauri() {
     uninstallHook: () => invoke<ConfigDirHookStatus[]>("uninstall_hook"),
 
     // Organizer
-    runOrganizePass: () => invoke<OrganizerReport>("run_organize_pass"),
+    runOrganizePass: (force?: boolean) => invoke<OrganizerReport>("run_organize_pass", { force: force ?? false }),
     undoLastOrganize: () => invoke<string>("undo_last_organize"),
     listHistory: (limit?: number) =>
       invoke<HistoryEntry[]>("list_history", { limit }),
