@@ -1,82 +1,42 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from "vue";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { useTauri } from "@/composables/useTauri";
-import type { DreamProposal, DreamReport, DreamProgress } from "@/types";
+import { ref, computed, onMounted } from "vue";
+import { useAppStore } from "@/stores/app";
+import type { DreamProposal } from "@/types";
 
-const tauri = useTauri();
-
-const proposals = ref<DreamProposal[]>([]);
-const running = ref(false);
-const progress = ref<DreamProgress | null>(null);
-const lastReport = ref<DreamReport | null>(null);
-const error = ref<string | null>(null);
+const app = useAppStore();
 const expanded = ref<Set<string>>(new Set());
 
-let unlisten: UnlistenFn | null = null;
-
-onMounted(async () => {
-  unlisten = await listen<DreamProgress>("dreamer:progress", (e) => {
-    progress.value = e.payload;
-  });
-  await loadProposals();
+onMounted(() => {
+  // Reload proposals when entering the view (catches proposals from a run
+  // that completed while we were on another page)
+  app.loadDreamProposals();
 });
-
-onUnmounted(() => {
-  unlisten?.();
-});
-
-async function loadProposals() {
-  try {
-    proposals.value = await tauri.listDreamProposals();
-  } catch (e) {
-    error.value = String(e);
-  }
-}
-
-async function runDream() {
-  if (running.value) return;
-  running.value = true;
-  error.value = null;
-  progress.value = null;
-  try {
-    lastReport.value = await tauri.runDreamPass();
-    await loadProposals();
-  } catch (e) {
-    error.value = String(e);
-  } finally {
-    running.value = false;
-    progress.value = null;
-  }
-}
 
 async function apply(proposal: DreamProposal) {
   try {
-    await tauri.applyDreamProposal(proposal.id);
-    proposals.value = proposals.value.filter((p) => p.id !== proposal.id);
+    await app.applyDreamProposal(proposal.id);
   } catch (e) {
-    error.value = String(e);
+    // error surfaces via store
   }
 }
 
 async function dismiss(proposal: DreamProposal) {
   try {
-    await tauri.dismissDreamProposal(proposal.id);
-    proposals.value = proposals.value.filter((p) => p.id !== proposal.id);
+    await app.dismissDreamProposal(proposal.id);
   } catch (e) {
-    error.value = String(e);
+    // error surfaces via store
   }
 }
 
 async function applyAll() {
   for (const p of newProposals.value) {
-    await apply(p);
+    await app.applyDreamProposal(p.id);
   }
 }
 
 async function dismissAll() {
   for (const p of [...newProposals.value, ...staleProposals.value]) {
-    await dismiss(p);
+    await app.dismissDreamProposal(p.id);
   }
 }
 
@@ -89,10 +49,10 @@ function toggleExpanded(id: string) {
 }
 
 const newProposals = computed(() =>
-  proposals.value.filter((p) => p.proposal_type === "new"),
+  app.dreamProposals.filter((p) => p.proposal_type === "new"),
 );
 const staleProposals = computed(() =>
-  proposals.value.filter((p) => p.proposal_type === "stale"),
+  app.dreamProposals.filter((p) => p.proposal_type === "stale"),
 );
 
 const memoryTypeLabel: Record<string, string> = {
@@ -116,12 +76,12 @@ const memoryTypeLabel: Record<string, string> = {
         </div>
         <button
           class="dream-btn"
-          :class="{ 'is-running': running }"
-          :disabled="running"
-          @click="runDream"
+          :class="{ 'is-running': app.dreaming }"
+          :disabled="app.dreaming"
+          @click="app.runDream()"
         >
-          <span v-if="running" class="btn-spinner" aria-hidden="true"></span>
-          <span>{{ running ? progress?.message ?? "Dreaming…" : "Dream now" }}</span>
+          <span v-if="app.dreaming" class="btn-spinner" aria-hidden="true"></span>
+          <span>{{ app.dreaming ? app.dreamProgress?.message ?? "Dreaming…" : "Dream now" }}</span>
         </button>
       </div>
 
@@ -130,38 +90,50 @@ const memoryTypeLabel: Record<string, string> = {
       </p>
 
       <!-- Progress bar -->
-      <div v-if="running && progress" class="progress-bar-wrap">
+      <div v-if="app.dreaming" class="progress-bar-wrap">
         <div
           class="progress-bar"
-          :style="{ width: progress.total > 0 ? `${(progress.current / progress.total) * 100}%` : '30%' }"
+          :style="{
+            width: app.dreamProgress && app.dreamProgress.total > 0
+              ? `${(app.dreamProgress.current / app.dreamProgress.total) * 100}%`
+              : '20%',
+          }"
         ></div>
       </div>
 
       <!-- Last run summary -->
-      <div v-if="lastReport && !running" class="run-summary">
+      <div v-if="app.lastDreamReport && !app.dreaming" class="run-summary">
         <span class="summary-item">
-          <span class="summary-num">{{ lastReport.transcripts_reviewed }}</span> sessions reviewed
+          <span class="summary-num">{{ app.lastDreamReport.transcripts_reviewed }}</span> sessions reviewed
         </span>
         <span class="summary-dot">·</span>
         <span class="summary-item">
-          <span class="summary-num">{{ lastReport.new_proposals }}</span> new proposals
+          <span class="summary-num">{{ app.lastDreamReport.new_proposals }}</span> new proposals
         </span>
         <span class="summary-dot">·</span>
         <span class="summary-item">
-          <span class="summary-num">{{ lastReport.stale_flags }}</span> stale flags
+          <span class="summary-num">{{ app.lastDreamReport.stale_flags }}</span> stale flags
         </span>
-        <template v-if="lastReport.errors.length > 0">
+        <template v-if="app.lastDreamReport.errors.length > 0">
           <span class="summary-dot">·</span>
-          <span class="summary-item summary-err">{{ lastReport.errors.length }} error{{ lastReport.errors.length === 1 ? '' : 's' }}</span>
+          <span class="summary-item summary-err">
+            {{ app.lastDreamReport.errors.length }} error{{ app.lastDreamReport.errors.length === 1 ? '' : 's' }}
+          </span>
         </template>
       </div>
 
       <!-- Error -->
-      <div v-if="error" class="dream-error">{{ error }}</div>
+      <div v-if="app.dreamError" class="dream-error">{{ app.dreamError }}</div>
+    </div>
+
+    <!-- Running state (navigated back mid-run) -->
+    <div v-if="app.dreaming" class="running-state">
+      <span class="running-spinner" aria-hidden="true"></span>
+      <span>{{ app.dreamProgress?.message ?? "Dreaming…" }}</span>
     </div>
 
     <!-- Empty state -->
-    <div v-if="!running && proposals.length === 0" class="empty-state">
+    <div v-else-if="app.dreamProposals.length === 0" class="empty-state">
       <div class="empty-icon">
         <svg viewBox="0 0 16 16" fill="currentColor">
           <path d="M8 1a.5.5 0 01.5.5v1a.5.5 0 01-1 0v-1A.5.5 0 018 1zM4.5 3.086a.5.5 0 01.707 0l.707.707a.5.5 0 01-.707.707l-.707-.707a.5.5 0 010-.707zm7 0a.5.5 0 010 .707l-.707.707a.5.5 0 11-.707-.707l.707-.707a.5.5 0 01.707 0zM8 5a3 3 0 100 6 3 3 0 000-6zm-5 3a.5.5 0 01.5-.5h1a.5.5 0 010 1h-1A.5.5 0 013 8zm9 0a.5.5 0 01.5-.5h1a.5.5 0 010 1h-1A.5.5 0 0112 8zm-7.207 3.793a.5.5 0 010 .707l-.707.707a.5.5 0 01-.707-.707l.707-.707a.5.5 0 01.707 0zm8.414 0a.5.5 0 01.707 0l.707.707a.5.5 0 01-.707.707l-.707-.707a.5.5 0 010-.707zM7.5 13a.5.5 0 011 0v1a.5.5 0 01-1 0v-1z"/>
@@ -172,11 +144,13 @@ const memoryTypeLabel: Record<string, string> = {
     </div>
 
     <!-- Proposals -->
-    <div v-else-if="proposals.length > 0" class="proposals-wrap">
+    <div v-else class="proposals-wrap">
 
       <!-- Bulk actions -->
       <div class="bulk-row">
-        <span class="bulk-count">{{ proposals.length }} proposal{{ proposals.length === 1 ? '' : 's' }} pending</span>
+        <span class="bulk-count">
+          {{ app.dreamProposals.length }} proposal{{ app.dreamProposals.length === 1 ? '' : 's' }} pending
+        </span>
         <div class="bulk-actions">
           <button v-if="newProposals.length > 0" class="bulk-btn apply-all" @click="applyAll">
             Apply all new
@@ -195,11 +169,7 @@ const memoryTypeLabel: Record<string, string> = {
           <span class="section-count">{{ newProposals.length }}</span>
         </h2>
         <div class="proposal-list">
-          <div
-            v-for="p in newProposals"
-            :key="p.id"
-            class="proposal-card"
-          >
+          <div v-for="p in newProposals" :key="p.id" class="proposal-card">
             <div class="card-header" @click="toggleExpanded(p.id)">
               <div class="card-meta">
                 <span class="type-badge" :class="`type-${p.memory_type}`">
@@ -207,12 +177,7 @@ const memoryTypeLabel: Record<string, string> = {
                 </span>
                 <span class="card-title">{{ p.title }}</span>
               </div>
-              <svg
-                class="chevron"
-                :class="{ 'is-open': expanded.has(p.id) }"
-                viewBox="0 0 16 16"
-                fill="currentColor"
-              >
+              <svg class="chevron" :class="{ 'is-open': expanded.has(p.id) }" viewBox="0 0 16 16" fill="currentColor">
                 <path fill-rule="evenodd" d="M4.22 6.22a.75.75 0 011.06 0L8 8.94l2.72-2.72a.75.75 0 111.06 1.06l-3.25 3.25a.75.75 0 01-1.06 0L4.22 7.28a.75.75 0 010-1.06z" clip-rule="evenodd" />
               </svg>
             </div>
@@ -243,22 +208,13 @@ const memoryTypeLabel: Record<string, string> = {
           <span class="section-count">{{ staleProposals.length }}</span>
         </h2>
         <div class="proposal-list">
-          <div
-            v-for="p in staleProposals"
-            :key="p.id"
-            class="proposal-card stale-card"
-          >
+          <div v-for="p in staleProposals" :key="p.id" class="proposal-card stale-card">
             <div class="card-header" @click="toggleExpanded(p.id)">
               <div class="card-meta">
                 <span class="type-badge type-stale">stale</span>
                 <span class="card-title">{{ p.title }}</span>
               </div>
-              <svg
-                class="chevron"
-                :class="{ 'is-open': expanded.has(p.id) }"
-                viewBox="0 0 16 16"
-                fill="currentColor"
-              >
+              <svg class="chevron" :class="{ 'is-open': expanded.has(p.id) }" viewBox="0 0 16 16" fill="currentColor">
                 <path fill-rule="evenodd" d="M4.22 6.22a.75.75 0 011.06 0L8 8.94l2.72-2.72a.75.75 0 111.06 1.06l-3.25 3.25a.75.75 0 01-1.06 0L4.22 7.28a.75.75 0 010-1.06z" clip-rule="evenodd" />
               </svg>
             </div>
@@ -290,7 +246,6 @@ const memoryTypeLabel: Record<string, string> = {
   padding: 1.5rem 1.25rem 4rem;
 }
 
-/* ── Header ── */
 .dream-header {
   margin-bottom: 2rem;
 }
@@ -340,31 +295,21 @@ const memoryTypeLabel: Record<string, string> = {
   white-space: nowrap;
   transition: opacity 0.15s;
 }
-.dream-btn:hover:not(:disabled) {
-  opacity: 0.85;
-}
-.dream-btn:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-.dream-btn.is-running {
-  background: var(--color-accent-muted);
-}
+.dream-btn:hover:not(:disabled) { opacity: 0.85; }
+.dream-btn:disabled { opacity: 0.6; cursor: default; }
+.dream-btn.is-running { background: var(--color-accent-muted); }
 
 .btn-spinner {
   display: inline-block;
   width: 0.75rem;
   height: 0.75rem;
-  border: 1.5px solid rgba(255, 255, 255, 0.4);
+  border: 1.5px solid rgba(255,255,255,0.4);
   border-top-color: #fff;
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
   flex-shrink: 0;
 }
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
+@keyframes spin { to { transform: rotate(360deg); } }
 
 .progress-bar-wrap {
   height: 2px;
@@ -377,7 +322,7 @@ const memoryTypeLabel: Record<string, string> = {
   height: 100%;
   background: var(--color-accent);
   border-radius: 1px;
-  transition: width 0.3s ease;
+  transition: width 0.4s ease;
 }
 
 .run-summary {
@@ -388,16 +333,9 @@ const memoryTypeLabel: Record<string, string> = {
   color: var(--color-text-muted);
   flex-wrap: wrap;
 }
-.summary-num {
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-.summary-dot {
-  color: var(--color-border);
-}
-.summary-err {
-  color: #e57373;
-}
+.summary-num { font-weight: 600; color: var(--color-text-primary); }
+.summary-dot { color: var(--color-border); }
+.summary-err { color: #e57373; }
 
 .dream-error {
   margin-top: 0.75rem;
@@ -409,6 +347,27 @@ const memoryTypeLabel: Record<string, string> = {
   color: #e57373;
 }
 
+/* ── Running state ── */
+.running-state {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 2rem 1rem;
+  justify-content: center;
+  font-size: 0.875rem;
+  color: var(--color-text-muted);
+}
+.running-spinner {
+  display: inline-block;
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
 /* ── Empty state ── */
 .empty-state {
   display: flex;
@@ -418,29 +377,10 @@ const memoryTypeLabel: Record<string, string> = {
   padding: 4rem 1rem;
   text-align: center;
 }
-.empty-icon {
-  width: 2.5rem;
-  height: 2.5rem;
-  color: var(--color-text-muted);
-  opacity: 0.4;
-}
-.empty-icon svg {
-  width: 100%;
-  height: 100%;
-}
-.empty-title {
-  font-size: 0.9375rem;
-  font-weight: 600;
-  color: var(--color-text-primary);
-  margin: 0;
-}
-.empty-sub {
-  font-size: 0.8125rem;
-  color: var(--color-text-muted);
-  margin: 0;
-  max-width: 26rem;
-  line-height: 1.5;
-}
+.empty-icon { width: 2.5rem; height: 2.5rem; color: var(--color-text-muted); opacity: 0.4; }
+.empty-icon svg { width: 100%; height: 100%; }
+.empty-title { font-size: 0.9375rem; font-weight: 600; color: var(--color-text-primary); margin: 0; }
+.empty-sub { font-size: 0.8125rem; color: var(--color-text-muted); margin: 0; max-width: 26rem; line-height: 1.5; }
 
 /* ── Bulk row ── */
 .bulk-row {
@@ -450,14 +390,8 @@ const memoryTypeLabel: Record<string, string> = {
   gap: 1rem;
   margin-bottom: 1.25rem;
 }
-.bulk-count {
-  font-size: 0.8125rem;
-  color: var(--color-text-muted);
-}
-.bulk-actions {
-  display: flex;
-  gap: 0.5rem;
-}
+.bulk-count { font-size: 0.8125rem; color: var(--color-text-muted); }
+.bulk-actions { display: flex; gap: 0.5rem; }
 .bulk-btn {
   padding: 0.25rem 0.625rem;
   font-size: 0.75rem;
@@ -468,23 +402,12 @@ const memoryTypeLabel: Record<string, string> = {
   cursor: pointer;
   transition: all 0.15s;
 }
-.bulk-btn:hover {
-  color: var(--color-text-primary);
-  border-color: var(--color-text-muted);
-}
-.bulk-btn.apply-all:hover {
-  color: var(--color-accent);
-  border-color: var(--color-accent-muted);
-}
-.bulk-btn.dismiss-all:hover {
-  color: #e57373;
-  border-color: color-mix(in srgb, #e57373 40%, transparent);
-}
+.bulk-btn:hover { color: var(--color-text-primary); border-color: var(--color-text-muted); }
+.bulk-btn.apply-all:hover { color: var(--color-accent); border-color: var(--color-accent-muted); }
+.bulk-btn.dismiss-all:hover { color: #e57373; border-color: color-mix(in srgb, #e57373 40%, transparent); }
 
 /* ── Sections ── */
-.proposal-section {
-  margin-bottom: 2rem;
-}
+.proposal-section { margin-bottom: 2rem; }
 .section-title {
   display: flex;
   align-items: center;
@@ -496,25 +419,13 @@ const memoryTypeLabel: Record<string, string> = {
   color: var(--color-text-muted);
   margin: 0 0 0.75rem;
 }
-.section-dot {
-  width: 0.5rem;
-  height: 0.5rem;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
+.section-dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; flex-shrink: 0; }
 .new-dot { background: var(--color-accent); }
 .stale-dot { background: #e0a050; }
-.section-count {
-  margin-left: auto;
-  font-weight: 400;
-}
+.section-count { margin-left: auto; font-weight: 400; }
 
 /* ── Proposal cards ── */
-.proposal-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
+.proposal-list { display: flex; flex-direction: column; gap: 0.5rem; }
 
 .proposal-card {
   border: 1px solid var(--color-border);
@@ -522,9 +433,7 @@ const memoryTypeLabel: Record<string, string> = {
   background: var(--color-surface);
   overflow: hidden;
 }
-.stale-card {
-  border-color: color-mix(in srgb, #e0a050 25%, var(--color-border));
-}
+.stale-card { border-color: color-mix(in srgb, #e0a050 25%, var(--color-border)); }
 
 .card-header {
   display: flex;
@@ -534,17 +443,9 @@ const memoryTypeLabel: Record<string, string> = {
   cursor: pointer;
   user-select: none;
 }
-.card-header:hover {
-  background: var(--color-surface-hover, rgba(255,255,255,0.03));
-}
+.card-header:hover { background: var(--color-surface-hover, rgba(255,255,255,0.03)); }
 
-.card-meta {
-  display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
-  flex: 1;
-  flex-wrap: wrap;
-}
+.card-meta { display: flex; align-items: baseline; gap: 0.5rem; flex: 1; flex-wrap: wrap; }
 
 .type-badge {
   font-size: 0.6875rem;
@@ -561,24 +462,16 @@ const memoryTypeLabel: Record<string, string> = {
 .type-reference{ background: color-mix(in srgb, #f0c060 15%, transparent); color: #f0c060; }
 .type-stale    { background: color-mix(in srgb, #e0a050 15%, transparent); color: #e0a050; }
 
-.card-title {
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: var(--color-text-primary);
-  line-height: 1.4;
-}
+.card-title { font-size: 0.875rem; font-weight: 500; color: var(--color-text-primary); line-height: 1.4; }
 
 .chevron {
-  width: 1rem;
-  height: 1rem;
+  width: 1rem; height: 1rem;
   color: var(--color-text-muted);
   flex-shrink: 0;
   transition: transform 0.15s;
   margin-top: 0.1rem;
 }
-.chevron.is-open {
-  transform: rotate(180deg);
-}
+.chevron.is-open { transform: rotate(180deg); }
 
 .card-description {
   padding: 0 0.875rem 0.625rem;
@@ -609,16 +502,9 @@ const memoryTypeLabel: Record<string, string> = {
   border-top: 1px solid var(--color-border);
   margin-top: 0.25rem;
 }
-.reasoning-label {
-  font-weight: 600;
-  margin-right: 0.25rem;
-}
+.reasoning-label { font-weight: 600; margin-right: 0.25rem; }
 
-.card-actions {
-  display: flex;
-  gap: 0.5rem;
-  padding: 0.5rem 0.875rem 0.75rem;
-}
+.card-actions { display: flex; gap: 0.5rem; padding: 0.5rem 0.875rem 0.75rem; }
 
 .action-btn {
   padding: 0.3125rem 0.75rem;
@@ -630,25 +516,10 @@ const memoryTypeLabel: Record<string, string> = {
   transition: all 0.15s;
   font-weight: 500;
 }
-.apply-btn {
-  color: var(--color-accent);
-  border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
-}
-.apply-btn:hover {
-  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
-}
-.delete-btn {
-  color: #e57373;
-  border-color: color-mix(in srgb, #e57373 40%, transparent);
-}
-.delete-btn:hover {
-  background: color-mix(in srgb, #e57373 12%, transparent);
-}
-.dismiss-btn {
-  color: var(--color-text-muted);
-}
-.dismiss-btn:hover {
-  color: var(--color-text-primary);
-  border-color: var(--color-text-muted);
-}
+.apply-btn { color: var(--color-accent); border-color: color-mix(in srgb, var(--color-accent) 40%, transparent); }
+.apply-btn:hover { background: color-mix(in srgb, var(--color-accent) 12%, transparent); }
+.delete-btn { color: #e57373; border-color: color-mix(in srgb, #e57373 40%, transparent); }
+.delete-btn:hover { background: color-mix(in srgb, #e57373 12%, transparent); }
+.dismiss-btn { color: var(--color-text-muted); }
+.dismiss-btn:hover { color: var(--color-text-primary); border-color: var(--color-text-muted); }
 </style>

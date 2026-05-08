@@ -11,6 +11,9 @@ import type {
   SetupResult,
   OrganizerReport,
   OrganizerProgress,
+  DreamReport,
+  DreamProgress,
+  DreamProposal,
 } from "@/types";
 import { useTauri } from "@/composables/useTauri";
 
@@ -40,9 +43,17 @@ export const useAppStore = defineStore("app", () => {
   const lastOrganizeReport = ref<OrganizerReport | null>(null);
   const error = ref<string | null>(null);
 
+  // Dream state (persists across navigation)
+  const dreaming = ref(false);
+  const dreamProgress = ref<DreamProgress | null>(null);
+  const lastDreamReport = ref<DreamReport | null>(null);
+  const dreamProposals = ref<DreamProposal[]>([]);
+  const dreamError = ref<string | null>(null);
+
   // Polling for external changes (e.g. MCP server adding memories)
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let progressUnlisten: UnlistenFn | null = null;
+  let dreamUnlisten: UnlistenFn | null = null;
   const lastKnownCount = ref(0);
 
   // Computed
@@ -277,6 +288,10 @@ export const useAppStore = defineStore("app", () => {
       progressUnlisten();
       progressUnlisten = null;
     }
+    if (dreamUnlisten) {
+      dreamUnlisten();
+      dreamUnlisten = null;
+    }
   }
 
   async function startProgressListener() {
@@ -289,11 +304,54 @@ export const useAppStore = defineStore("app", () => {
     );
   }
 
+  async function startDreamListener() {
+    if (dreamUnlisten) return;
+    dreamUnlisten = await listen<DreamProgress>("dreamer:progress", (event) => {
+      dreamProgress.value = event.payload;
+    });
+  }
+
+  async function runDream() {
+    if (dreaming.value) return;
+    dreaming.value = true;
+    dreamError.value = null;
+    dreamProgress.value = null;
+    try {
+      lastDreamReport.value = await tauri.runDreamPass();
+      dreamProposals.value = await tauri.listDreamProposals();
+    } catch (e) {
+      dreamError.value = String(e);
+    } finally {
+      dreaming.value = false;
+      dreamProgress.value = null;
+    }
+  }
+
+  async function loadDreamProposals() {
+    try {
+      dreamProposals.value = await tauri.listDreamProposals();
+    } catch (e) {
+      dreamError.value = String(e);
+    }
+  }
+
+  async function applyDreamProposal(id: string) {
+    await tauri.applyDreamProposal(id);
+    dreamProposals.value = dreamProposals.value.filter((p) => p.id !== id);
+  }
+
+  async function dismissDreamProposal(id: string) {
+    await tauri.dismissDreamProposal(id);
+    dreamProposals.value = dreamProposals.value.filter((p) => p.id !== id);
+  }
+
   async function initialize() {
     await loadStatus();
     await loadAutoOrganize();
     await loadSplitThreshold();
     await startProgressListener();
+    await startDreamListener();
+    await loadDreamProposals();
     if (!needsSetup.value) {
       lastKnownCount.value = totalMemories.value;
       await loadTopics();
@@ -344,5 +402,15 @@ export const useAppStore = defineStore("app", () => {
     initialize,
     stopPolling,
     lastKnownCount,
+    // dream
+    dreaming,
+    dreamProgress,
+    lastDreamReport,
+    dreamProposals,
+    dreamError,
+    runDream,
+    loadDreamProposals,
+    applyDreamProposal,
+    dismissDreamProposal,
   };
 });
