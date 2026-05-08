@@ -161,6 +161,33 @@ export interface ScanProposal {
 
 export type DateFilter = "all" | "7d" | "30d" | "90d";
 
+export interface DreamProposal {
+  id: string;
+  proposal_type: "new" | "stale";
+  title: string;
+  content: string;
+  description: string;
+  memory_type: string;
+  reasoning: string;
+  target_memory_id: string | null;
+  status: "pending" | "applied" | "dismissed";
+  created_at: number;
+}
+
+export interface DreamReport {
+  new_proposals: number;
+  stale_flags: number;
+  transcripts_reviewed: number;
+  errors: string[];
+}
+
+export interface DreamProgress {
+  phase: string;
+  message: string;
+  current: number;
+  total: number;
+}
+
 export interface OrganizerReport {
   classified_count: number;
   new_topics_created: string[];

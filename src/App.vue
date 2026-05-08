@@ -38,6 +38,10 @@ function goGraph() {
   router.push({ name: "graph" });
 }
 
+function goDream() {
+  router.push({ name: "dream" });
+}
+
 function onSearchSubmit() {
   const q = searchInput.value.trim();
   if (!q) return;
@@ -78,6 +82,17 @@ function onSearchClear() {
           ×
         </button>
       </form>
+
+      <button
+        class="icon-btn"
+        :class="{ 'is-active': route.name === 'dream' }"
+        title="Dreaming"
+        @click="goDream"
+      >
+        <svg viewBox="0 0 16 16" fill="currentColor" class="icon">
+          <path d="M8 1a.5.5 0 01.5.5v1a.5.5 0 01-1 0v-1A.5.5 0 018 1zM4.5 3.086a.5.5 0 01.707 0l.707.707a.5.5 0 01-.707.707l-.707-.707a.5.5 0 010-.707zm7 0a.5.5 0 010 .707l-.707.707a.5.5 0 11-.707-.707l.707-.707a.5.5 0 01.707 0zM8 5a3 3 0 100 6 3 3 0 000-6zm-5 3a.5.5 0 01.5-.5h1a.5.5 0 010 1h-1A.5.5 0 013 8zm9 0a.5.5 0 01.5-.5h1a.5.5 0 010 1h-1A.5.5 0 0112 8zm-7.207 3.793a.5.5 0 010 .707l-.707.707a.5.5 0 01-.707-.707l.707-.707a.5.5 0 01.707 0zm8.414 0a.5.5 0 01.707 0l.707.707a.5.5 0 01-.707.707l-.707-.707a.5.5 0 010-.707zM7.5 13a.5.5 0 011 0v1a.5.5 0 01-1 0v-1z"/>
+        </svg>
+      </button>
 
       <button
         class="icon-btn"

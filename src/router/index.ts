@@ -27,6 +27,11 @@ const routes = [
     name: "graph",
     component: () => import("@/views/GraphView.vue"),
   },
+  {
+    path: "/dream",
+    name: "dream",
+    component: () => import("@/views/DreamView.vue"),
+  },
 ];
 
 export const router = createRouter({

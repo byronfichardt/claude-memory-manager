@@ -20,6 +20,8 @@ import type {
   RepoEdge,
   ScanProposal,
   EmbeddingStatus,
+  DreamProposal,
+  DreamReport,
 } from "@/types";
 
 export function useTauri() {
@@ -129,5 +131,12 @@ export function useTauri() {
     enableSemanticSearch: () => invoke<void>("enable_semantic_search"),
     disableSemanticSearch: () => invoke<void>("disable_semantic_search"),
     triggerEmbeddingSweep: () => invoke<void>("trigger_embedding_sweep"),
+
+    // Dreaming
+    runDreamPass: () => invoke<DreamReport>("run_dream_pass"),
+    listDreamProposals: () => invoke<DreamProposal[]>("list_dream_proposals"),
+    getDreamProposalCount: () => invoke<number>("get_dream_proposal_count"),
+    applyDreamProposal: (id: string) => invoke<void>("apply_dream_proposal", { id }),
+    dismissDreamProposal: (id: string) => invoke<void>("dismiss_dream_proposal", { id }),
   };
 }
