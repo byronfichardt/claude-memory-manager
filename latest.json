@@ -1,11 +1,11 @@
 {
-  "version": "0.3.6",
-  "notes": "v0.3.6 — Repo graph: namespace support, scan wizard, manual add form",
-  "pub_date": "2026-05-01T10:34:31Z",
+  "version": "0.4.0",
+  "notes": "Repo graph first-encounter analysis + frontend detection improvements",
+  "pub_date": "2026-05-08T06:39:55Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRHRXREZtWUVDWDZFcHRETjNXcXUxRWVBYTlUMlBTeGZTVGlJQzJFYWVPVE9SQnRsMlVncytDNElQNTBsZ3lYRUZPRm1GY1ZXaytsZG5hVko3empMVUF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc3NjMxNjU2CWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKajN3SkRadlhZalVyaXVpVWdsV0ZqZVNEczVyTmhaeWZZVjVJSTE3UXhnWDdGVTR2YzlZWFkxYlI3QkpGOHhvRlNWMTFCQm5GYjd2elo5ZEZMdEFFQkE9PQo=",
-      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.3.6/Claude.Memory.Manager.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRHViUlZNM1RKOCt6NXBHMk1EZUEvNVhZWDlmNlZKWURJV1hBcldYZVhhZnJxdVg4UzJSYVNUYzNtMDI5M1BlT3VqM3lLdlU4YU9TcHdXRld2ZjFwK2dvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4MjIyMzkwCWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKc0NESFpoQkIxVG5NWktLdTN0SWJoYU85LzlDeG9URG1rRFNMS05CYTRNRHE4ZllpSDJ0WVVQRWtoZHNTVzZERW1wL01HaWt4SWR0RHVpVTZ0aVFDRGc9PQo=",
+      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.0/Claude.Memory.Manager.app.tar.gz"
     }
   }
 }
