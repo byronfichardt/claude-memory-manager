@@ -5,8 +5,8 @@ use crate::services::installer::{
     self, ConfigDirRegistration, SetupResult, UninstallReport, MCP_SERVER_NAME,
     SETTING_CUSTOM_DB_DIR, SETTING_HOOK_ENABLED,
 };
-use crate::services::{bootstrap, embeddings, organizer, portable};
-use crate::store::{edges, history, memories, repo_edges, settings, topics};
+use crate::services::{bootstrap, dreamer, embeddings, organizer, portable};
+use crate::store::{dreams, edges, history, memories, repo_edges, settings, topics};
 
 const SETTING_AUTO_ORGANIZE: &str = "auto_organize";
 
@@ -568,4 +568,59 @@ pub async fn trigger_embedding_sweep() -> Result<(), String> {
         Ok(())
     })
     .await
+}
+
+// ── Dreaming ──────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn run_dream_pass(app: tauri::AppHandle) -> Result<dreamer::DreamReport, String> {
+    dreamer::run_dream_pass(Some(app)).await
+}
+
+#[tauri::command]
+pub async fn list_dream_proposals() -> Result<Vec<dreams::DreamProposal>, String> {
+    blocking(dreams::list_pending).await
+}
+
+#[tauri::command]
+pub async fn get_dream_proposal_count() -> Result<i64, String> {
+    blocking(dreams::pending_count).await
+}
+
+/// Apply a "new" proposal — inserts it into the memory store.
+/// Apply a "stale" proposal — deletes the flagged memory.
+#[tauri::command]
+pub async fn apply_dream_proposal(id: String) -> Result<(), String> {
+    blocking(move || {
+        let proposal = dreams::get(&id)?
+            .ok_or_else(|| format!("dream proposal not found: {}", id))?;
+
+        match proposal.proposal_type.as_str() {
+            "new" => {
+                memories::insert(memories::NewMemory {
+                    title: proposal.title,
+                    description: proposal.description,
+                    content: proposal.content,
+                    memory_type: Some(proposal.memory_type),
+                    topic: None,
+                    source: Some("dream".to_string()),
+                    project: None,
+                })?;
+            }
+            "stale" => {
+                if let Some(ref target_id) = proposal.target_memory_id {
+                    memories::delete(target_id)?;
+                }
+            }
+            _ => {}
+        }
+
+        dreams::set_status(&id, "applied")
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn dismiss_dream_proposal(id: String) -> Result<(), String> {
+    blocking(move || dreams::set_status(&id, "dismissed")).await
 }

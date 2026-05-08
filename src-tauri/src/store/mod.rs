@@ -1,3 +1,4 @@
+pub mod dreams;
 pub mod edges;
 pub mod encountered;
 pub mod history;
@@ -313,7 +314,34 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
             .map_err(|e| format!("bump v7: {}", e))?;
     }
 
+    if version < 8 {
+        apply_migration_v8(conn)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (8)", [])
+            .map_err(|e| format!("bump v8: {}", e))?;
+    }
+
     Ok(())
+}
+
+fn apply_migration_v8(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS dream_proposals (
+            id TEXT PRIMARY KEY,
+            proposal_type TEXT NOT NULL DEFAULT 'new',
+            title TEXT NOT NULL DEFAULT '',
+            content TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            memory_type TEXT NOT NULL DEFAULT 'project',
+            reasoning TEXT NOT NULL DEFAULT '',
+            target_memory_id TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_dream_status ON dream_proposals(status);
+        "#,
+    )
+    .map_err(|e| format!("migration v8: {}", e))
 }
 
 fn apply_migration_v7(conn: &Connection) -> Result<(), String> {
