@@ -1,4 +1,5 @@
 pub mod edges;
+pub mod encountered;
 pub mod history;
 pub mod memories;
 pub mod repo_edges;
@@ -306,7 +307,23 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
             .map_err(|e| format!("bump v6: {}", e))?;
     }
 
+    if version < 7 {
+        apply_migration_v7(conn)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (7)", [])
+            .map_err(|e| format!("bump v7: {}", e))?;
+    }
+
     Ok(())
+}
+
+fn apply_migration_v7(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        ALTER TABLE repo_edges ADD COLUMN namespace TEXT NOT NULL DEFAULT 'default';
+        UPDATE repo_edges SET namespace = 'hobbii';
+        "#,
+    )
+    .map_err(|e| format!("migration v7: {}", e))
 }
 
 fn apply_migration_v6(conn: &Connection) -> Result<(), String> {

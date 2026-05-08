@@ -17,6 +17,8 @@ import type {
   ImportMode,
   ImportReport,
   RepoGraph,
+  RepoEdge,
+  ScanProposal,
   EmbeddingStatus,
 } from "@/types";
 
@@ -104,7 +106,12 @@ export function useTauri() {
       invoke<ImportReport>("import_memories", { path, mode }),
 
     // Repo relationship graph
-    getRepoGraph: () => invoke<RepoGraph>("get_repo_graph"),
+    getRepoGraph: (namespace?: string) => invoke<RepoGraph>("get_repo_graph", { namespace }),
+    listRepoNamespaces: () => invoke<string[]>("list_repo_namespaces"),
+    addRepoEdge: (sourceRepo: string, targetRepo: string, relationshipType: string, evidence: string, namespace: string) =>
+      invoke<RepoEdge>("add_repo_edge", { sourceRepo, targetRepo, relationshipType, evidence, namespace }),
+    deleteRepoEdge: (id: number) => invoke<void>("delete_repo_edge", { id }),
+    scanReposInDirectory: (path: string) => invoke<ScanProposal[]>("scan_repos_in_directory", { path }),
 
     // Bulk operations
     bulkDeleteMemories: (ids: string[]) =>

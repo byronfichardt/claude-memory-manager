@@ -503,8 +503,37 @@ fn is_server_registered_in_dir(config_dir: &std::path::Path) -> bool {
 }
 
 #[tauri::command]
-pub async fn get_repo_graph() -> Result<repo_edges::RepoGraph, String> {
-    blocking(repo_edges::full_graph).await
+pub async fn get_repo_graph(namespace: Option<String>) -> Result<repo_edges::RepoGraph, String> {
+    blocking(move || repo_edges::full_graph(namespace.as_deref())).await
+}
+
+#[tauri::command]
+pub async fn list_repo_namespaces() -> Result<Vec<String>, String> {
+    blocking(repo_edges::list_namespaces).await
+}
+
+#[tauri::command]
+pub async fn add_repo_edge(
+    source_repo: String,
+    target_repo: String,
+    relationship_type: String,
+    evidence: String,
+    namespace: String,
+) -> Result<repo_edges::RepoEdge, String> {
+    blocking(move || {
+        repo_edges::upsert(&source_repo, &target_repo, &relationship_type, &evidence, &namespace)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn delete_repo_edge(id: i64) -> Result<(), String> {
+    blocking(move || repo_edges::delete(id)).await
+}
+
+#[tauri::command]
+pub async fn scan_repos_in_directory(path: String) -> Result<Vec<repo_edges::ScanProposal>, String> {
+    blocking(move || repo_edges::scan_directory(&path)).await
 }
 
 #[tauri::command]

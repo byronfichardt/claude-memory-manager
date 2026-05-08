@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 
 use crate::services::project;
-use crate::store::{self, edges, memories, repo_edges};
+use crate::store::{self, edges, encountered, memories, repo_edges};
 
 const MAX_RESULTS: u32 = 5;
 const MAX_SNIPPET_CHARS: usize = 300;
@@ -167,6 +167,31 @@ pub fn run() -> Result<(), String> {
                     out.push_str("Use repo_graph to see the full picture. Use repo_link to record new dependencies you discover.\n");
                     out.push_str("</repo-relationship-context>\n");
                 }
+            }
+        }
+
+        // First-encounter: fire once per repo, nudges Claude to map dependencies
+        // before answering. Runs the static scanner to surface heuristic hints,
+        // then asks Claude to verify and extend with what the scanner can't see.
+        if let Some(ref project_path) = active_project {
+            if encountered::is_first_encounter(project_path) {
+                encountered::mark_encountered(project_path);
+
+                let repo_name = project_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| project_path.to_string_lossy().to_string());
+
+                let scan_hints: Vec<repo_edges::ScanProposal> = project_path
+                    .parent()
+                    .and_then(|p| repo_edges::scan_directory(&p.to_string_lossy()).ok())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|p| p.source_repo == repo_name || p.target_repo == repo_name)
+                    .collect();
+
+                out.push_str(&build_first_encounter_nudge(&repo_name, &scan_hints));
+                out.push('\n');
             }
         }
 
@@ -357,6 +382,35 @@ fn hybrid_search(
         .collect();
 
     Ok(results)
+}
+
+fn build_first_encounter_nudge(repo_name: &str, scan_hints: &[repo_edges::ScanProposal]) -> String {
+    let mut s = String::from("<first-encounter>\n");
+    s.push_str(&format!(
+        "First time entering `{}`. Before answering the user's question, spend 2-3 tool calls mapping its external dependencies — this builds the repo relationship graph over time.\n\n",
+        repo_name
+    ));
+
+    if !scan_hints.is_empty() {
+        s.push_str("Static scan found these potential relationships (read the relevant files to verify, then confirm with repo_link):\n");
+        for hint in scan_hints {
+            s.push_str(&format!(
+                "  {} --[{}]--> {}  ({})\n",
+                hint.source_repo, hint.relationship_type, hint.target_repo, hint.evidence
+            ));
+        }
+        s.push('\n');
+    }
+
+    s.push_str("Also check what the scanner can't see:\n");
+    s.push_str("- fetch/axios/HTTP client calls with hardcoded service URLs\n");
+    s.push_str("- TypeScript/JS imports of internal packages (also check workspaces field in package.json)\n");
+    s.push_str("- Framework proxy config: vite.config.ts proxy targets, next.config.js rewrites/redirects\n");
+    s.push_str("- API client setup files (e.g. src/api.ts, src/services/, lib/http.ts)\n");
+    s.push_str("- VITE_*/NEXT_PUBLIC_*/REACT_APP_* env vars pointing to backend services\n\n");
+    s.push_str("Call `repo_link` for each real dependency you find. If nothing turns up after a brief look, proceed — the graph builds incrementally.\n");
+    s.push_str("</first-encounter>\n");
+    s
 }
 
 const CORRECTION_NUDGE: &str = "\

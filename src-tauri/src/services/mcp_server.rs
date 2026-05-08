@@ -305,6 +305,10 @@ fn handle_tools_list() -> Value {
                         "evidence": {
                             "type": "string",
                             "description": "Brief human-readable description of where you saw this dependency, e.g. 'SanityService.php makes HTTP calls to SANITY_CMS_URL env var'."
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Optional namespace/workspace for this relationship (e.g. 'hobbii', 'personal'). Defaults to 'default' if omitted."
                         }
                     },
                     "required": ["source_repo", "target_repo", "relationship_type", "evidence"]
@@ -312,13 +316,17 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "repo_graph",
-                "description": "Retrieve the repository relationship graph — all service/project dependencies that have been recorded. Optionally filter to edges involving a specific repo. Use this to understand architecture context before making cross-service changes.",
+                "description": "Retrieve the repository relationship graph — all service/project dependencies that have been recorded. Optionally filter to edges involving a specific repo or namespace. Use this to understand architecture context before making cross-service changes.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "repo": {
                             "type": "string",
                             "description": "Optional: filter to edges involving this repo (as source or target). If omitted, returns the full graph."
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Optional: filter to edges belonging to this namespace (e.g. 'hobbii', 'personal')."
                         }
                     }
                 }
@@ -600,14 +608,20 @@ fn tool_repo_link(args: Value) -> Result<String, String> {
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim();
+    let namespace = args
+        .get("namespace")
+        .and_then(Value::as_str)
+        .unwrap_or("default")
+        .trim();
 
-    let edge = repo_edges::upsert(source_repo, target_repo, relationship_type, evidence)?;
+    let edge = repo_edges::upsert(source_repo, target_repo, relationship_type, evidence, namespace)?;
 
     Ok(format!(
-        "Repo relationship recorded.\n{} --[{}]--> {}\nEvidence: {}\nid: {}",
+        "Repo relationship recorded.\n{} --[{}]--> {} (namespace: {})\nEvidence: {}\nid: {}",
         short_project(source_repo),
         edge.relationship_type,
         short_project(target_repo),
+        edge.namespace,
         edge.evidence,
         edge.id,
     ))
@@ -615,8 +629,9 @@ fn tool_repo_link(args: Value) -> Result<String, String> {
 
 fn tool_repo_graph(args: Value) -> Result<String, String> {
     let filter_repo = args.get("repo").and_then(Value::as_str);
+    let filter_namespace = args.get("namespace").and_then(Value::as_str);
 
-    let edges = repo_edges::list(filter_repo)?;
+    let edges = repo_edges::list(filter_repo, filter_namespace)?;
 
     if edges.is_empty() {
         return Ok(match filter_repo {
@@ -625,17 +640,20 @@ fn tool_repo_graph(args: Value) -> Result<String, String> {
         });
     }
 
-    let mut out = match filter_repo {
-        Some(r) => format!("Repo relationships for {} ({} edges):\n\n", short_project(r), edges.len()),
-        None => format!("Full repo relationship graph ({} edges):\n\n", edges.len()),
+    let mut out = match (filter_repo, filter_namespace) {
+        (Some(r), Some(ns)) => format!("Repo relationships for {} in namespace '{}' ({} edges):\n\n", short_project(r), ns, edges.len()),
+        (Some(r), None) => format!("Repo relationships for {} ({} edges):\n\n", short_project(r), edges.len()),
+        (None, Some(ns)) => format!("Repo relationships in namespace '{}' ({} edges):\n\n", ns, edges.len()),
+        (None, None) => format!("Full repo relationship graph ({} edges):\n\n", edges.len()),
     };
 
     for edge in &edges {
         out.push_str(&format!(
-            "{} --[{}]--> {}\n  Evidence: {}\n\n",
+            "{} --[{}]--> {} [{}]\n  Evidence: {}\n\n",
             short_project(&edge.source_repo),
             edge.relationship_type,
             short_project(&edge.target_repo),
+            edge.namespace,
             edge.evidence,
         ));
     }

@@ -140,6 +140,7 @@ export interface RepoEdge {
   target_repo: string;
   relationship_type: string;
   evidence: string;
+  namespace: string;
   weight: number;
   created_at: number;
   updated_at: number;
@@ -148,6 +149,14 @@ export interface RepoEdge {
 export interface RepoGraph {
   nodes: string[];
   edges: RepoEdge[];
+  namespaces: string[];
+}
+
+export interface ScanProposal {
+  source_repo: string;
+  target_repo: string;
+  relationship_type: string;
+  evidence: string;
 }
 
 export type DateFilter = "all" | "7d" | "30d" | "90d";
