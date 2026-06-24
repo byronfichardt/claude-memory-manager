@@ -193,8 +193,20 @@ pub fn delete(id: &str) -> Result<(), String> {
     flag_dependents_for_review(id);
 
     with_conn(|conn| {
-        conn.execute("DELETE FROM memories WHERE id = ?1", params![id])
+        // Both deletes in one transaction so we never leave a memory deleted
+        // with its embedding still present (or vice versa).
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("delete tx: {}", e))?;
+        tx.execute("DELETE FROM memories WHERE id = ?1", params![id])
             .map_err(|e| format!("delete: {}", e))?;
+        // Keep the vector index in sync. vec_memories is a vec0 virtual table
+        // with no FK cascade, so its row must be removed explicitly — otherwise
+        // it lingers as an orphan embedding that wastes index space and can
+        // occupy slots in KNN search, pushing real hits out of the top-K.
+        tx.execute("DELETE FROM vec_memories WHERE memory_id = ?1", params![id])
+            .map_err(|e| format!("delete vec: {}", e))?;
+        tx.commit().map_err(|e| format!("delete commit: {}", e))?;
         Ok(())
     })
 }
@@ -207,14 +219,27 @@ pub fn bulk_delete(ids: &[String]) -> Result<usize, String> {
         flag_dependents_for_review(id);
     }
     with_conn(|conn| {
+        // One transaction for the memories delete plus all vector deletes, so a
+        // partial failure can't leave memories gone with their embeddings behind.
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("bulk_delete tx: {}", e))?;
         let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{}", i)).collect();
         let sql = format!(
             "DELETE FROM memories WHERE id IN ({})",
             placeholders.join(", ")
         );
-        let count = conn
+        let count = tx
             .execute(&sql, rusqlite::params_from_iter(ids.iter()))
             .map_err(|e| format!("bulk_delete: {}", e))?;
+        // Mirror the deletion into the vector index (vec0 has no FK cascade).
+        // Point-delete by PK per id — vec0 DELETE is reliable on the primary
+        // key but not with an IN (...) list.
+        for id in ids {
+            tx.execute("DELETE FROM vec_memories WHERE memory_id = ?1", params![id])
+                .map_err(|e| format!("bulk_delete vec: {}", e))?;
+        }
+        tx.commit().map_err(|e| format!("bulk_delete commit: {}", e))?;
         Ok(count)
     })
 }

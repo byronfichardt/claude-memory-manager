@@ -105,6 +105,55 @@ fn count_indexed() -> Result<i64, String> {
     })
 }
 
+/// Drop embeddings whose memory no longer exists. vec_memories (vec0) has no
+/// foreign-key cascade, so a memory that was deleted or merged away leaves its
+/// vector behind. Orphans waste index space and can occupy slots in KNN search,
+/// pushing real hits out of the top-K. delete()/bulk_delete() now remove vectors
+/// inline; this clears any orphans that accumulated before that fix. Cheap and
+/// idempotent — safe to run at the start of every sweep. Returns the count removed.
+fn prune_orphan_embeddings() -> Result<usize, String> {
+    with_conn(|conn| {
+        // Full scan of the vec0 table for its keys, plus all live memory ids,
+        // then point-delete the difference by PK. Doing the diff in Rust avoids
+        // relying on vec0 honouring a NOT IN subquery during a virtual-table scan.
+        let vec_ids: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT memory_id FROM vec_memories")
+                .map_err(|e| format!("prune scan vec: {}", e))?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| format!("prune scan vec rows: {}", e))?;
+            rows.filter_map(Result::ok).collect()
+        };
+        // Propagate row errors here rather than filter them: a dropped live id
+        // would make a real memory's embedding look orphaned and get deleted —
+        // permanent vector loss. Abort the prune instead.
+        let live: std::collections::HashSet<String> = {
+            let mut stmt = conn
+                .prepare("SELECT id FROM memories")
+                .map_err(|e| format!("prune scan mem: {}", e))?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| format!("prune scan mem rows: {}", e))?;
+            rows.collect::<Result<std::collections::HashSet<String>, _>>()
+                .map_err(|e| format!("prune read mem rows: {}", e))?
+        };
+
+        // Delete all orphans in one transaction (atomic + avoids per-row fsync).
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("prune tx: {}", e))?;
+        let mut removed = 0usize;
+        for id in vec_ids.iter().filter(|id| !live.contains(*id)) {
+            tx.execute("DELETE FROM vec_memories WHERE memory_id = ?1", params![id])
+                .map_err(|e| format!("prune delete: {}", e))?;
+            removed += 1;
+        }
+        tx.commit().map_err(|e| format!("prune commit: {}", e))?;
+        Ok(removed)
+    })
+}
+
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 /// Enable semantic search: persist setting, then start background init + sweep.
@@ -196,6 +245,14 @@ pub fn trigger_sweep() {
 fn run_sweep_blocking() {
     if IS_SWEEPING.swap(true, Ordering::Relaxed) {
         return;
+    }
+
+    // Clear any embeddings left behind by deleted/merged memories before we
+    // index new ones, so the vector index stays 1:1 with live memories.
+    match prune_orphan_embeddings() {
+        Ok(0) => {}
+        Ok(n) => eprintln!("[embeddings] pruned {} orphan vector(s)", n),
+        Err(e) => eprintln!("[embeddings] prune_orphan_embeddings error: {}", e),
     }
 
     let total = store::memories::count().unwrap_or(0) as u64;
