@@ -293,6 +293,65 @@ pub fn delete_by_ids(edge_ids: &[i64]) -> Result<(), String> {
     })
 }
 
+/// Prune the low-signal `relates-to` graph so it can't drown the meaningful
+/// edges (`supersedes` / `depends-on` / `contradicts`) or blow up
+/// `memory_related`. Co-access wiring connects every co-retrieved pair on every
+/// prompt, so without a ceiling the graph grows N² and its average weight
+/// collapses (measured at 0.15 across ~12.7k edges).
+///
+/// Two rules, applied only to `relates-to` edges (typed edges are never touched):
+///   1. Drop any edge weaker than `floor`.
+///   2. Degree cap — keep at most `top_k` per node by weight. An edge survives
+///      if it is in the top_k of EITHER endpoint, so a link that matters to one
+///      node isn't severed just because the other endpoint is busy.
+///
+/// Returns the number of edges deleted. Idempotent: re-running on a pruned graph
+/// removes nothing.
+pub fn prune_relates_to(floor: f64, top_k: usize) -> Result<usize, String> {
+    with_conn(|conn| {
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("prune tx: {}", e))?;
+
+        // Rule 1 — weak edges.
+        let mut removed = tx
+            .execute(
+                "DELETE FROM memory_edges WHERE edge_type = 'relates-to' AND weight < ?1",
+                params![floor],
+            )
+            .map_err(|e| format!("prune weak: {}", e))?;
+
+        // Rule 2 — degree cap. Rank each relates-to edge within each of its two
+        // endpoints (a node counts edges where it is source OR target), then
+        // delete edges that fall outside top_k for BOTH endpoints.
+        removed += tx
+            .execute(
+                r#"
+                WITH endpoint_ranks AS (
+                    SELECT id, ROW_NUMBER() OVER (
+                        PARTITION BY node ORDER BY weight DESC, id
+                    ) AS rnk
+                    FROM (
+                        SELECT id, source_id AS node, weight FROM memory_edges
+                            WHERE edge_type = 'relates-to'
+                        UNION ALL
+                        SELECT id, target_id AS node, weight FROM memory_edges
+                            WHERE edge_type = 'relates-to'
+                    )
+                )
+                DELETE FROM memory_edges
+                WHERE edge_type = 'relates-to'
+                  AND id NOT IN (SELECT id FROM endpoint_ranks WHERE rnk <= ?1)
+                "#,
+                params![top_k as i64],
+            )
+            .map_err(|e| format!("prune degree: {}", e))?;
+
+        tx.commit().map_err(|e| format!("prune commit: {}", e))?;
+        Ok(removed)
+    })
+}
+
 /// Total edge count (for stats).
 pub fn count() -> Result<i64, String> {
     with_conn(|conn| {

@@ -17,6 +17,9 @@ pub struct Memory {
     pub created_at: i64,
     pub updated_at: i64,
     pub access_count: i64,
+    /// When set, the memory is archived: kept in the store but excluded from
+    /// recall (search + graph hydration). Set by prune-on-supersede; reversible.
+    pub archived_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +58,7 @@ fn row_to_memory(row: &Row) -> rusqlite::Result<Memory> {
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         access_count: row.get("access_count")?,
+        archived_at: row.get("archived_at")?,
     })
 }
 
@@ -188,6 +192,37 @@ pub fn update_project(id: &str, project: Option<&str>) -> Result<Memory, String>
     })
 }
 
+/// Archive a memory: exclude it from recall (search + graph hydration) while
+/// keeping the row and its embedding in the store, so the action is fully
+/// reversible via `unarchive`. Used by prune-on-supersede. No-op if already
+/// archived. Returns true if this call archived it.
+pub fn archive(id: &str) -> Result<bool, String> {
+    with_conn(|conn| archive_with_conn(conn, id))
+}
+
+pub fn archive_with_conn(conn: &Connection, id: &str) -> Result<bool, String> {
+    let now = now_ts();
+    let changed = conn
+        .execute(
+            "UPDATE memories SET archived_at = ?1 WHERE id = ?2 AND archived_at IS NULL",
+            params![now, id],
+        )
+        .map_err(|e| format!("archive: {}", e))?;
+    Ok(changed > 0)
+}
+
+/// Restore an archived memory back into recall.
+pub fn unarchive(id: &str) -> Result<(), String> {
+    with_conn(|conn| {
+        conn.execute(
+            "UPDATE memories SET archived_at = NULL WHERE id = ?1",
+            params![id],
+        )
+        .map_err(|e| format!("unarchive: {}", e))?;
+        Ok(())
+    })
+}
+
 pub fn delete(id: &str) -> Result<(), String> {
     // Flag dependents before deletion (CASCADE will remove edges)
     flag_dependents_for_review(id);
@@ -297,7 +332,7 @@ pub fn list_since(since_ts: i64, limit: usize) -> Result<Vec<Memory>, String> {
     with_conn(|conn| {
         let mut stmt = conn
             .prepare(
-                "SELECT * FROM memories WHERE updated_at >= ?1 ORDER BY updated_at DESC LIMIT ?2",
+                "SELECT * FROM memories WHERE updated_at >= ?1 AND archived_at IS NULL ORDER BY updated_at DESC LIMIT ?2",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
@@ -381,8 +416,10 @@ pub fn get_by_ids_with_conn(conn: &Connection, ids: &[&str]) -> Result<Vec<Memor
     }
 
     let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{}", i)).collect();
+    // Graph-neighbour hydration (the only callers) — archived memories must not
+    // resurface through the relationship graph.
     let sql = format!(
-        "SELECT * FROM memories WHERE id IN ({})",
+        "SELECT * FROM memories WHERE archived_at IS NULL AND id IN ({})",
         placeholders.join(", ")
     );
 
@@ -432,7 +469,7 @@ pub fn search_with_conn(
                       bm25(memories_fts) as score
                FROM memories_fts
                JOIN memories m ON m.rowid = memories_fts.rowid
-               WHERE memories_fts MATCH ?1
+               WHERE memories_fts MATCH ?1 AND m.archived_at IS NULL
                ORDER BY score
                LIMIT ?2"#,
         )

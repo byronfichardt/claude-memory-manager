@@ -320,7 +320,33 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
             .map_err(|e| format!("bump v8: {}", e))?;
     }
 
+    if version < 9 {
+        apply_migration_v9(conn)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (9)", [])
+            .map_err(|e| format!("bump v9: {}", e))?;
+    }
+
     Ok(())
+}
+
+/// Adds a nullable `archived_at` column to `memories`. Archived memories stay in
+/// the store (so archiving is reversible and their embeddings survive) but are
+/// excluded from recall — FTS search and graph-neighbour hydration filter on
+/// `archived_at IS NULL`. Guarded against a pre-existing column so a manual
+/// backfill (e.g. the one-off superseded-cleanup) can't make the migration fail.
+fn apply_migration_v9(conn: &Connection) -> Result<(), String> {
+    let has_col: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('memories') WHERE name = 'archived_at'")
+        .and_then(|mut s| s.exists([]))
+        .unwrap_or(false);
+    if !has_col {
+        conn.execute_batch("ALTER TABLE memories ADD COLUMN archived_at INTEGER;")
+            .map_err(|e| format!("migration v9 add column: {}", e))?;
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_memories_archived ON memories(archived_at);",
+    )
+    .map_err(|e| format!("migration v9 index: {}", e))
 }
 
 fn apply_migration_v8(conn: &Connection) -> Result<(), String> {
