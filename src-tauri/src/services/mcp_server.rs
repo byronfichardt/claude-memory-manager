@@ -454,10 +454,23 @@ fn tool_memory_add(args: Value) -> Result<String, String> {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let memory_type = args
-        .get("type")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    // Default a missing/blank/unknown type to "project" so nothing lands in the
+    // store untyped (untyped memories dodge scoping and type-based recall). The
+    // four valid types pass through unchanged; anything else coerces to project.
+    let memory_type = Some(
+        match args
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some("user") => "user",
+            Some("feedback") => "feedback",
+            Some("reference") => "reference",
+            _ => "project",
+        }
+        .to_string(),
+    );
     let topic = args
         .get("topic")
         .and_then(Value::as_str)

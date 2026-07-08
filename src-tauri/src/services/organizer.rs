@@ -45,6 +45,12 @@ const DEDUP_MIN_TOPIC_SIZE: usize = 2;
 const CONSOLIDATE_SAMPLE_PER_TOPIC: usize = 6;
 const RELATE_BATCH_SIZE: usize = 20;
 const RELATE_MAX_CONTENT: usize = 400;
+/// `relates-to` edges below this weight are pruned. Co-access seeds edges at
+/// 0.1 and strengthens by 0.05 per repeat, so 0.2 keeps only pairs co-retrieved
+/// at least ~3 times and drops one-off coincidences.
+const RELATES_PRUNE_FLOOR: f64 = 0.2;
+/// Max `relates-to` edges kept per node (by weight) after the floor pass.
+const RELATES_PRUNE_TOP_K: usize = 12;
 pub const SPLIT_DEFAULT_THRESHOLD: usize = 15;
 pub const SPLIT_THRESHOLD_MIN: usize = 5;
 const SPLIT_MIN_SUB_TOPIC_SIZE: usize = 3;
@@ -149,6 +155,10 @@ pub struct OrganizerReport {
     pub edges_created: usize,
     pub consolidated_topics: Vec<String>,
     pub split_topics: Vec<String>,
+    /// Memories archived by prune-on-supersede (superseded originals removed from recall).
+    pub archived_count: usize,
+    /// Weak/excess `relates-to` edges pruned this pass.
+    pub pruned_edges: usize,
     pub errors: Vec<String>,
 }
 
@@ -287,6 +297,15 @@ pub async fn run_full_pass(handle: Option<AppHandle>, force: bool) -> Result<Org
     match split_oversized_topics(h, &client, &mut report, force).await {
         Ok(()) => {}
         Err(e) => report.errors.push(format!("split: {}", e)),
+    }
+
+    // Phase 5: prune the low-signal `relates-to` graph. Co-access wiring adds
+    // edges on every prompt, so this bounded sweep every pass stops the graph
+    // from growing N² and diluting the meaningful typed edges.
+    emit(h, "prune", "Pruning weak relationship edges", 0, 1);
+    match edges::prune_relates_to(RELATES_PRUNE_FLOOR, RELATES_PRUNE_TOP_K) {
+        Ok(n) => report.pruned_edges = n,
+        Err(e) => report.errors.push(format!("prune edges: {}", e)),
     }
 
     let _ = settings::set(SETTING_LAST_ORGANIZE_TS, &now_ts.to_string());
@@ -1254,12 +1273,13 @@ fn apply_discovered_edges(
             continue;
         }
 
-        // Verify both memories exist
-        let source_exists = memories::get(&ai_edge.source_id)?.is_some();
-        let target_exists = memories::get(&ai_edge.target_id)?.is_some();
-        if !source_exists || !target_exists {
-            continue;
-        }
+        // Verify both memories exist (and keep them for the supersede check below)
+        let source = memories::get(&ai_edge.source_id)?;
+        let target = memories::get(&ai_edge.target_id)?;
+        let (source, target) = match (source, target) {
+            (Some(s), Some(t)) => (s, t),
+            _ => continue,
+        };
 
         match edges::insert(
             &ai_edge.source_id,
@@ -1270,6 +1290,36 @@ fn apply_discovered_edges(
         ) {
             Ok(_) => report.edges_created += 1,
             Err(e) => report.errors.push(format!("edge insert: {}", e)),
+        }
+
+        // Prune-on-supersede: a `supersedes` edge means `source` replaces the now
+        // outdated `target`. Archive the target so recall stops returning the
+        // stale version alongside the correction. Reversible (archived, not
+        // deleted) and recorded to history for undo.
+        //
+        // Gated to same-project supersedes as a false-positive guard: the relate
+        // pass runs per-topic (so both already share `topic`), and requiring the
+        // same project too means we only auto-archive when the two memories are
+        // near-certainly the same fact evolved — not a loose cross-context link
+        // the model happened to label "supersedes".
+        if edge_type == "supersedes" && source.project == target.project {
+            match memories::archive(&target.id) {
+                Ok(true) => {
+                    report.archived_count += 1;
+                    let _ = history::record(
+                        "archive",
+                        serde_json::json!({
+                            "action": "archive",
+                            "reason": "superseded",
+                            "memory_id": target.id,
+                            "superseded_by": source.id,
+                            "topic": topic,
+                        }),
+                    );
+                }
+                Ok(false) => {}
+                Err(e) => report.errors.push(format!("archive superseded: {}", e)),
+            }
         }
     }
 
