@@ -1,11 +1,11 @@
 {
-  "version": "0.4.3",
-  "notes": "Fix dream state lost on navigation",
-  "pub_date": "2026-05-08T08:49:01Z",
+  "version": "0.4.5",
+  "notes": "Store self-maintenance: superseded memories are now archived out of recall automatically (prune-on-supersede), the relationship graph is pruned to stay lean, and new memories are always typed.",
+  "pub_date": "2026-07-08T13:41:23Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRHRpSnlUalczckJzTlV6WlB1Q2JNUjRsK0QyVlNZZ205MjdEVGs4L0Z6cnkwWW1WL0wwV0piRWhhblc3TTluMWVhcDhUY1d0WTBQTE5jbkxFUzhNa1E0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4MjMwMTMyCWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKSWtJRlF3VGpkZWxSbS9GenZWenhhaU90eHNienlBamV4S3d0Uko1Yk9UbFNYTGJwNHVFTi9WSzVwY1YrK0h2ZHc4U3krdmZ4QkJ1NGhEeEZrZFdtQVE9PQo=",
-      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.3/Claude.Memory.Manager.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRHQ2SnlvN2dHWElQd2w3aThINUFlZW9OODRzeUhCbFJLRmEzY0pPdkdkU3lucjFGd3FMSzk3bkw2czg3TTVrdE5ady9NSEVYWEplVHhabW1rT0c4cFE0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzNTExMDc1CWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKZnp5aW4vS3U2V2xvN3B5cGFEVUhOWkNnNEhlYXo1TFE2UGM5aE04WTBvNFF0YzBpMjRwbm1uNlp0VHh2ajA3emEyc0V0R2hZbWJIa1Jyd25VMHJoRFE9PQo=",
+      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.5/Claude.Memory.Manager.app.tar.gz"
     }
   }
 }
