@@ -56,6 +56,13 @@ pub fn run_first_time_setup() -> Result<SetupResult, String> {
     // (also short-circuits with NO_CLAUDE_INSTALL if no ~/.claude* found)
     bootstrap::ensure_claude_md_all()?;
 
+    // Step 1b: Also inject the same section into Pi's global ~/.pi/agent/AGENTS.md
+    // if Pi (pi.dev) is installed. Best-effort: Pi support is additive to the
+    // primary Claude Code integration, so a failure here must not abort setup.
+    if let Err(e) = bootstrap::ensure_pi_agents_md() {
+        crate::store::record_startup_error(format!("Pi AGENTS.md injection failed: {}", e));
+    }
+
     // Step 2: Ingest existing memory files from all configs
     let report = ingestion::ingest_existing_files()?;
 
@@ -235,6 +242,15 @@ pub fn uninstall_everything() -> UninstallReport {
         });
     }
 
+    // Step 4b: Remove the managed section from Pi's global AGENTS.md (no-op if
+    // Pi isn't installed or the file has no managed block).
+    let pi_result = bootstrap::remove_pi_agents_md_section();
+    steps.push(UninstallStep {
+        label: "Strip Pi AGENTS.md section".to_string(),
+        success: pi_result.is_ok(),
+        error: pi_result.err(),
+    });
+
     // Step 5: Checkpoint + remove the data directory. The SQLite connection
     // stays open (it's a process-wide OnceLock) but on macOS/Linux an unlinked
     // file with open fds is fine — the app keeps running against the deleted
@@ -271,6 +287,14 @@ pub fn uninstall_everything() -> UninstallReport {
 /// isn't installed yet, or the CLI isn't on PATH), we deliberately leave the
 /// marker absent so the next launch retries.
 pub fn maybe_auto_bootstrap() {
+    // Pi's AGENTS.md injection is idempotent and independent of the Claude
+    // first-run marker, so run it on every launch. This backfills Pi support for
+    // users who configured Claude Code before Pi injection existed, and for those
+    // who install Pi later. No-op if Pi isn't installed.
+    if let Err(e) = bootstrap::ensure_pi_agents_md() {
+        crate::store::record_startup_error(format!("Pi AGENTS.md injection failed: {}", e));
+    }
+
     let marker_path = crate::store::data_dir().join("first-run.json");
 
     // Already completed a successful auto-run — nothing to do.

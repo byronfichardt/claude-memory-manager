@@ -148,18 +148,15 @@ pub fn list_claude_config_dirs() -> Vec<(String, PathBuf)> {
     results
 }
 
-/// Create or update the managed section in a specific config dir's CLAUDE.md.
-pub fn ensure_claude_md_in(config_dir: &Path) -> Result<(), String> {
-    let path = config_dir.join("CLAUDE.md");
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
-    }
-
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-
-    let new_content = if existing.is_empty() {
+/// Merge the managed section into existing file content, idempotently.
+///
+/// - Empty input → just the managed section.
+/// - Input that already contains the markers → the marked block is replaced in
+///   place, preserving everything before and after it.
+/// - Input with no markers → the managed section is appended after existing
+///   content.
+fn merge_managed_section(existing: &str) -> String {
+    if existing.is_empty() {
         MANAGED_SECTION.to_string() + "\n"
     } else if let (Some(start), Some(end)) = (existing.find(BEGIN_MARKER), existing.find(END_MARKER))
     {
@@ -175,11 +172,52 @@ pub fn ensure_claude_md_in(config_dir: &Path) -> Result<(), String> {
         out.push_str(MANAGED_SECTION);
         out.push('\n');
         out
-    };
+    }
+}
 
-    atomic_write(&path, new_content.as_bytes())
+/// Create or update the managed section in an arbitrary managed file, creating
+/// parent directories as needed. Shared by CLAUDE.md (Claude Code) and AGENTS.md
+/// (Pi) injection.
+fn ensure_managed_file(path: &Path) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
+    }
+
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let new_content = merge_managed_section(&existing);
+
+    atomic_write(path, new_content.as_bytes())
         .map_err(|e| format!("write {}: {}", path.display(), e))?;
     Ok(())
+}
+
+/// Strip the managed section from a managed file. Removes the file entirely if
+/// nothing but the managed section remained. No-op if the file or markers are
+/// absent. Shared by CLAUDE.md and AGENTS.md uninstall.
+fn remove_managed_file(path: &Path) -> Result<(), String> {
+    let existing = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+
+    if let (Some(start), Some(end)) = (existing.find(BEGIN_MARKER), existing.find(END_MARKER)) {
+        let end_idx = end + END_MARKER.len();
+        let mut out = String::new();
+        out.push_str(existing[..start].trim_end());
+        out.push_str(existing[end_idx..].trim_start());
+        if out.trim().is_empty() {
+            std::fs::remove_file(path).ok();
+        } else {
+            atomic_write(path, out.as_bytes()).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// Create or update the managed section in a specific config dir's CLAUDE.md.
+pub fn ensure_claude_md_in(config_dir: &Path) -> Result<(), String> {
+    ensure_managed_file(&config_dir.join("CLAUDE.md"))
 }
 
 /// Write `contents` to `path` atomically by writing a sibling temp file and
@@ -217,24 +255,48 @@ pub fn ensure_claude_md_all() -> Result<(), String> {
 
 #[allow(dead_code)]
 pub fn remove_claude_md_section_in(config_dir: &Path) -> Result<(), String> {
-    let path = config_dir.join("CLAUDE.md");
-    let existing = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => return Ok(()),
-    };
+    remove_managed_file(&config_dir.join("CLAUDE.md"))
+}
 
-    if let (Some(start), Some(end)) = (existing.find(BEGIN_MARKER), existing.find(END_MARKER)) {
-        let end_idx = end + END_MARKER.len();
-        let mut out = String::new();
-        out.push_str(existing[..start].trim_end());
-        out.push_str(existing[end_idx..].trim_start());
-        if out.trim().is_empty() {
-            std::fs::remove_file(&path).ok();
-        } else {
-            atomic_write(&path, out.as_bytes()).map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(())
+/// Pi (pi.dev) coding agent's global config directory: `~/.pi/agent`.
+///
+/// Pi loads context files from `~/.pi/agent/AGENTS.md` (global), plus AGENTS.md /
+/// CLAUDE.md walking up from the working directory. Its loader picks the first of
+/// `["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"]` per directory, so
+/// AGENTS.md wins over CLAUDE.md — we write the global one here.
+fn pi_agent_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".pi").join("agent"))
+}
+
+/// True if Pi appears to be installed, i.e. its global config dir exists.
+/// Pi drops `settings.json`, `mcp.json`, `auth.json`, etc. in `~/.pi/agent`, so
+/// the directory's presence is a reliable install signal.
+pub fn is_pi_installed() -> bool {
+    pi_agent_dir().map(|d| d.is_dir()).unwrap_or(false)
+}
+
+/// Create or update the managed section in Pi's global `~/.pi/agent/AGENTS.md`,
+/// mirroring the CLAUDE.md injection so the same memory-usage rules govern Pi.
+///
+/// No-op (Ok) when Pi isn't installed, so Claude-only users never get a stray
+/// `~/.pi` tree. Best-effort: callers treat failure as non-fatal since Pi
+/// support is additive to the primary Claude Code integration.
+pub fn ensure_pi_agents_md() -> Result<(), String> {
+    let dir = match pi_agent_dir() {
+        Some(d) if d.is_dir() => d,
+        _ => return Ok(()),
+    };
+    ensure_managed_file(&dir.join("AGENTS.md"))
+}
+
+/// Remove the managed section from Pi's global AGENTS.md (uninstall).
+#[allow(dead_code)]
+pub fn remove_pi_agents_md_section() -> Result<(), String> {
+    let dir = match pi_agent_dir() {
+        Some(d) => d,
+        None => return Ok(()),
+    };
+    remove_managed_file(&dir.join("AGENTS.md"))
 }
 
 /// Install or remove the UserPromptSubmit hook that auto-injects relevant
@@ -657,5 +719,75 @@ mod tests {
         assert!(out.contains("Some instructions"));
         assert!(out.contains(BEGIN_MARKER));
         assert!(out.contains(END_MARKER));
+    }
+
+    #[test]
+    fn test_merge_managed_section_helper_all_paths() {
+        // Empty input → just the managed section.
+        let empty = merge_managed_section("");
+        assert!(empty.contains(BEGIN_MARKER) && empty.contains(END_MARKER));
+
+        // No markers → append, preserving existing content.
+        let appended = merge_managed_section("# AGENTS.md\n\nPreexisting rules.\n");
+        assert!(appended.contains("Preexisting rules."));
+        assert!(appended.contains(BEGIN_MARKER));
+
+        // Existing markers → replace in place, preserving surrounding content.
+        let existing = format!(
+            "# Head\n\n{}\nOLD\n{}\n\n# Tail\n",
+            BEGIN_MARKER, END_MARKER
+        );
+        let replaced = merge_managed_section(&existing);
+        assert!(replaced.contains("# Head"));
+        assert!(replaced.contains("# Tail"));
+        assert!(replaced.contains("memory_search"));
+        assert!(!replaced.contains("OLD"));
+    }
+
+    #[test]
+    fn test_ensure_and_remove_managed_file_roundtrip() {
+        // Exercises the shared file helpers Pi's AGENTS.md injection relies on.
+        let tmp = std::env::temp_dir().join(format!(
+            "cmm-agents-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Nested path also verifies parent-dir creation (mirrors ~/.pi/agent).
+        let path = tmp.join("agent").join("AGENTS.md");
+
+        // Fresh write creates the file + parents.
+        ensure_managed_file(&path).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains(BEGIN_MARKER) && written.contains(END_MARKER));
+
+        // Re-running is idempotent: exactly one managed block.
+        ensure_managed_file(&path).unwrap();
+        let again = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(again.matches(BEGIN_MARKER).count(), 1);
+
+        // User content around the block survives a re-run.
+        let with_user = format!("# Pi rules\n\nKeep me.\n\n{}", again.trim_start());
+        std::fs::write(&path, &with_user).unwrap();
+        ensure_managed_file(&path).unwrap();
+        let merged = std::fs::read_to_string(&path).unwrap();
+        assert!(merged.contains("Keep me."));
+        assert_eq!(merged.matches(BEGIN_MARKER).count(), 1);
+
+        // Removal strips only the managed block, leaving user content.
+        remove_managed_file(&path).unwrap();
+        let stripped = std::fs::read_to_string(&path).unwrap();
+        assert!(stripped.contains("Keep me."));
+        assert!(!stripped.contains(BEGIN_MARKER));
+
+        // Removing a managed-only file deletes it entirely.
+        ensure_managed_file(&path).unwrap();
+        // Simulate a file that is *only* the managed section.
+        std::fs::write(&path, MANAGED_SECTION).unwrap();
+        remove_managed_file(&path).unwrap();
+        assert!(!path.exists(), "managed-only file should be removed");
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }
