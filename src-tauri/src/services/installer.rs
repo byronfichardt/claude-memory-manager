@@ -1,8 +1,10 @@
 //! Install / uninstall orchestration for Claude Memory Manager.
 //!
 //! Wires the app into Claude Code's config directories (CLAUDE.md managed
-//! section, MCP server registration, UserPromptSubmit hook) and undoes all
-//! of it. Invoked by thin Tauri command wrappers in `commands/autopilot.rs`.
+//! section, MCP server registration, UserPromptSubmit hook) and, when the Pi
+//! (pi.dev) coding agent is installed, into `~/.pi/agent` (AGENTS.md managed
+//! section + memory MCP server in mcp.json) — then undoes all of it. Invoked by
+//! thin Tauri command wrappers in `commands/autopilot.rs`.
 
 use serde::Serialize;
 use std::path::Path;
@@ -55,6 +57,12 @@ pub fn run_first_time_setup() -> Result<SetupResult, String> {
     // Step 1: Write the managed section to every CLAUDE.md we can find
     // (also short-circuits with NO_CLAUDE_INSTALL if no ~/.claude* found)
     bootstrap::ensure_claude_md_all()?;
+
+    // Step 1b: Also wire up Pi (pi.dev) if it's installed — inject the same
+    // managed section into ~/.pi/agent/AGENTS.md and register the memory MCP
+    // server in ~/.pi/agent/mcp.json. Best-effort: Pi support is additive to the
+    // primary Claude Code integration, so failures here must not abort setup.
+    setup_pi_integration();
 
     // Step 2: Ingest existing memory files from all configs
     let report = ingestion::ingest_existing_files()?;
@@ -235,6 +243,22 @@ pub fn uninstall_everything() -> UninstallReport {
         });
     }
 
+    // Step 4b: Remove the managed section from Pi's global AGENTS.md and the
+    // memory MCP server from Pi's mcp.json (no-ops if Pi isn't installed or the
+    // entries are absent).
+    let pi_md = bootstrap::remove_pi_agents_md_section();
+    steps.push(UninstallStep {
+        label: "Strip Pi AGENTS.md section".to_string(),
+        success: pi_md.is_ok(),
+        error: pi_md.err(),
+    });
+    let pi_mcp = remove_pi_mcp_registration();
+    steps.push(UninstallStep {
+        label: "Unregister MCP (Pi)".to_string(),
+        success: pi_mcp.is_ok(),
+        error: pi_mcp.err(),
+    });
+
     // Step 5: Checkpoint + remove the data directory. The SQLite connection
     // stays open (it's a process-wide OnceLock) but on macOS/Linux an unlinked
     // file with open fds is fine — the app keeps running against the deleted
@@ -271,6 +295,14 @@ pub fn uninstall_everything() -> UninstallReport {
 /// isn't installed yet, or the CLI isn't on PATH), we deliberately leave the
 /// marker absent so the next launch retries.
 pub fn maybe_auto_bootstrap() {
+    // Backfill Pi support once for installs that predate it (or where Pi was
+    // installed after Claude setup completed). Gated by its own marker so it runs
+    // at most once automatically: a user who deletes the managed block from
+    // AGENTS.md is not clobbered on the next launch, and a persistent failure is
+    // not re-logged every launch. The explicit "Get started" path
+    // (run_first_time_setup) still re-runs it unconditionally as a retry.
+    maybe_backfill_pi_integration();
+
     let marker_path = crate::store::data_dir().join("first-run.json");
 
     // Already completed a successful auto-run — nothing to do.
@@ -353,4 +385,213 @@ fn write_success_marker(path: &Path, reason: &str) {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::write(path, body.to_string() + "\n");
+}
+
+// ---------------------------------------------------------------------------
+// Pi (pi.dev) integration
+// ---------------------------------------------------------------------------
+
+/// Best-effort: wire the memory manager into Pi if it's installed — inject the
+/// managed AGENTS.md section and register the memory MCP server in Pi's mcp.json.
+/// Each step is independent and non-fatal; failures are logged as startup errors
+/// because Pi support is additive to the primary Claude Code integration.
+fn setup_pi_integration() {
+    if !bootstrap::is_pi_installed() {
+        return;
+    }
+    if let Err(e) = bootstrap::ensure_pi_agents_md() {
+        crate::store::record_startup_error(format!("Pi AGENTS.md injection failed: {}", e));
+    }
+    if let Err(e) = register_mcp_in_pi() {
+        crate::store::record_startup_error(format!("Pi MCP registration failed: {}", e));
+    }
+}
+
+/// Run [`setup_pi_integration`] at most once automatically, gated by a marker in
+/// the data dir. This backfills Pi support on launch for pre-existing installs
+/// without clobbering a user who deliberately removed the managed block, and
+/// without re-logging a persistent failure on every launch.
+fn maybe_backfill_pi_integration() {
+    if !bootstrap::is_pi_installed() {
+        return;
+    }
+    let marker = crate::store::data_dir().join("pi-setup.json");
+    if marker.exists() {
+        return;
+    }
+    setup_pi_integration();
+    // Record the attempt regardless of per-step success so the automatic backfill
+    // does not repeat. Explicit re-setup ("Get started") remains a retry path.
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&marker, "{\"done\":true}\n");
+}
+
+/// Register (or update) the memory MCP server in Pi's global
+/// `~/.pi/agent/mcp.json`, preserving any other servers. No-op when Pi isn't
+/// installed. Pi has no registration CLI, so we edit the JSON file directly —
+/// this mirrors what `claude mcp add` does for Claude config dirs.
+fn register_mcp_in_pi() -> Result<(), String> {
+    let dir = match bootstrap::pi_agent_dir() {
+        Some(d) if d.is_dir() => d,
+        _ => return Ok(()),
+    };
+    let path = dir.join("mcp.json");
+
+    let binary = std::env::current_exe()
+        .map_err(|e| format!("Failed to get binary path: {}", e))?
+        .to_string_lossy()
+        .to_string();
+
+    let mut env = serde_json::Map::new();
+    let custom_db = settings::get(SETTING_CUSTOM_DB_DIR, "").unwrap_or_default();
+    if !custom_db.is_empty() {
+        env.insert(
+            "CLAUDE_MEMORY_DB_DIR".to_string(),
+            serde_json::Value::String(custom_db),
+        );
+    }
+
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut root: serde_json::Value = if existing.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(&existing).map_err(|e| format!("parse {}: {}", path.display(), e))?
+    };
+
+    upsert_mcp_server(&mut root, MCP_SERVER_NAME, &binary, env)
+        .map_err(|e| format!("{}: {}", path.display(), e))?;
+
+    let serialized =
+        serde_json::to_string_pretty(&root).map_err(|e| format!("serialize mcp.json: {}", e))?;
+    bootstrap::atomic_write(&path, (serialized + "\n").as_bytes())
+        .map_err(|e| format!("write {}: {}", path.display(), e))?;
+    Ok(())
+}
+
+/// Remove the memory MCP server from Pi's mcp.json (uninstall). Leaves other
+/// servers and a malformed/absent file untouched.
+fn remove_pi_mcp_registration() -> Result<(), String> {
+    let dir = match bootstrap::pi_agent_dir() {
+        Some(d) => d,
+        None => return Ok(()),
+    };
+    let path = dir.join("mcp.json");
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+    let mut root: serde_json::Value = match serde_json::from_str(&existing) {
+        Ok(v) => v,
+        Err(_) => return Ok(()), // don't touch a file we can't parse
+    };
+    if !remove_mcp_server_entry(&mut root, MCP_SERVER_NAME) {
+        return Ok(()); // nothing of ours to remove
+    }
+    let serialized =
+        serde_json::to_string_pretty(&root).map_err(|e| format!("serialize mcp.json: {}", e))?;
+    bootstrap::atomic_write(&path, (serialized + "\n").as_bytes())
+        .map_err(|e| format!("write {}: {}", path.display(), e))?;
+    Ok(())
+}
+
+/// Upsert `mcpServers.<name>` in a Pi mcp.json value, preserving sibling servers.
+/// Returns an error if the root or `mcpServers` is present but not a JSON object.
+fn upsert_mcp_server(
+    root: &mut serde_json::Value,
+    name: &str,
+    command: &str,
+    env: serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| "mcp.json root is not a JSON object".to_string())?;
+    let servers = obj
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| "mcpServers is not a JSON object".to_string())?;
+    servers.insert(
+        name.to_string(),
+        serde_json::json!({
+            "command": command,
+            "args": ["--mcp-server"],
+            "env": serde_json::Value::Object(env),
+            "lifecycle": "keep-alive",
+        }),
+    );
+    Ok(())
+}
+
+/// Remove `mcpServers.<name>` from a Pi mcp.json value. Returns true if an entry
+/// was actually removed.
+fn remove_mcp_server_entry(root: &mut serde_json::Value, name: &str) -> bool {
+    root.get_mut("mcpServers")
+        .and_then(|v| v.as_object_mut())
+        .map(|servers| servers.remove(name).is_some())
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_upsert_mcp_server_preserves_siblings() {
+        let mut root = serde_json::json!({
+            "mcpServers": {
+                "other": { "command": "/bin/other", "args": [] }
+            }
+        });
+        upsert_mcp_server(&mut root, "claude-memory-manager", "/app/cmm", serde_json::Map::new())
+            .unwrap();
+
+        let servers = root.get("mcpServers").unwrap().as_object().unwrap();
+        assert!(servers.contains_key("other"), "sibling server must be preserved");
+        let ours = servers.get("claude-memory-manager").unwrap();
+        assert_eq!(ours.get("command").unwrap(), "/app/cmm");
+        assert_eq!(ours.get("args").unwrap(), &serde_json::json!(["--mcp-server"]));
+        assert_eq!(ours.get("lifecycle").unwrap(), "keep-alive");
+    }
+
+    #[test]
+    fn test_upsert_mcp_server_creates_container_and_env() {
+        // Empty object: mcpServers must be created; custom env carried through.
+        let mut root = serde_json::json!({});
+        let mut env = serde_json::Map::new();
+        env.insert("CLAUDE_MEMORY_DB_DIR".to_string(), serde_json::json!("/data"));
+        upsert_mcp_server(&mut root, "claude-memory-manager", "/app/cmm", env).unwrap();
+
+        let ours = root
+            .pointer("/mcpServers/claude-memory-manager")
+            .expect("server entry created");
+        assert_eq!(ours.pointer("/env/CLAUDE_MEMORY_DB_DIR").unwrap(), "/data");
+    }
+
+    #[test]
+    fn test_upsert_mcp_server_rejects_non_object_root() {
+        let mut root = serde_json::json!("not an object");
+        assert!(upsert_mcp_server(&mut root, "x", "/app", serde_json::Map::new()).is_err());
+    }
+
+    #[test]
+    fn test_remove_mcp_server_entry() {
+        let mut root = serde_json::json!({
+            "mcpServers": {
+                "claude-memory-manager": { "command": "/app/cmm" },
+                "other": { "command": "/bin/other" }
+            }
+        });
+        assert!(remove_mcp_server_entry(&mut root, "claude-memory-manager"));
+        let servers = root.get("mcpServers").unwrap().as_object().unwrap();
+        assert!(!servers.contains_key("claude-memory-manager"));
+        assert!(servers.contains_key("other"), "sibling must survive removal");
+
+        // Second removal is a no-op returning false.
+        assert!(!remove_mcp_server_entry(&mut root, "claude-memory-manager"));
+        // Absent mcpServers → false, no panic.
+        let mut empty = serde_json::json!({});
+        assert!(!remove_mcp_server_entry(&mut empty, "claude-memory-manager"));
+    }
 }
