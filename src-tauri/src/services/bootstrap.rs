@@ -282,9 +282,12 @@ pub fn is_pi_installed() -> bool {
 /// `~/.pi` tree. Best-effort: callers treat failure as non-fatal since Pi
 /// support is additive to the primary Claude Code integration.
 pub fn ensure_pi_agents_md() -> Result<(), String> {
+    if !is_pi_installed() {
+        return Ok(());
+    }
     let dir = match pi_agent_dir() {
-        Some(d) if d.is_dir() => d,
-        _ => return Ok(()),
+        Some(d) => d,
+        None => return Ok(()),
     };
     ensure_managed_file(&dir.join("AGENTS.md"))
 }
