@@ -8,8 +8,6 @@ use crate::services::installer::{
 use crate::services::{bootstrap, dreamer, embeddings, organizer, portable};
 use crate::store::{dreams, edges, history, memories, repo_edges, settings, topics};
 
-const SETTING_AUTO_ORGANIZE: &str = "auto_organize";
-
 /// Run a blocking closure on tauri's blocking thread pool. Use for any
 /// command that touches the SQLite pool or other blocking I/O — keeps the
 /// async runtime worker (and the IPC bridge) free.
@@ -260,12 +258,12 @@ pub async fn list_history(limit: Option<i64>) -> Result<Vec<history::HistoryEntr
 
 #[tauri::command]
 pub async fn get_auto_organize() -> Result<bool, String> {
-    blocking(|| settings::get_bool(SETTING_AUTO_ORGANIZE, false)).await
+    blocking(|| settings::get_bool(organizer::SETTING_AUTO_ORGANIZE, false)).await
 }
 
 #[tauri::command]
 pub async fn set_auto_organize(enabled: bool) -> Result<(), String> {
-    blocking(move || settings::set_bool(SETTING_AUTO_ORGANIZE, enabled)).await
+    blocking(move || settings::set_bool(organizer::SETTING_AUTO_ORGANIZE, enabled)).await
 }
 
 #[tauri::command]
