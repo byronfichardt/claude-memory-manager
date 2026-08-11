@@ -16,6 +16,37 @@ pub fn run_hook() -> Result<(), String> {
     services::hook::run()
 }
 
+/// How often the tray app checks whether an automatic organize pass is due.
+/// The check itself is a single `COUNT(*)`, so this is cheap; the interval only
+/// bounds how long unclassified memories sit before being picked up.
+const AUTO_ORGANIZE_CHECK_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(15 * 60);
+
+/// Delay before the first check, so an organize pass doesn't compete with
+/// startup work (migrations, embedding sweep).
+const AUTO_ORGANIZE_STARTUP_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Periodically run an organize pass once enough memories are unclassified.
+///
+/// Without this the `auto_organize` setting was inert — the organizer only ever
+/// ran from the Organize button, so classification and the `relates-to` edge
+/// prune both stalled whenever the app wasn't manually poked.
+fn spawn_auto_organize_task(handle: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(AUTO_ORGANIZE_STARTUP_DELAY).await;
+        loop {
+            if let Some(report) = services::organizer::maybe_auto_organize(Some(handle.clone())).await
+            {
+                eprintln!(
+                    "auto-organize: classified {}, merged {}, pruned {} edges",
+                    report.classified_count, report.merged_count, report.pruned_edges
+                );
+            }
+            tokio::time::sleep(AUTO_ORGANIZE_CHECK_INTERVAL).await;
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     if let Err(e) = store::init() {
@@ -82,6 +113,8 @@ pub fn run() {
             {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
+
+            spawn_auto_organize_task(app.handle().clone());
 
             // Force-hide the main window on launch. macOS state restoration
             // can re-show the window after a restart, overriding the

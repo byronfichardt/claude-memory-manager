@@ -34,6 +34,47 @@ fn emit(handle: Option<&AppHandle>, phase: &'static str, message: impl Into<Stri
 
 const SETTING_LAST_ORGANIZE_TS: &str = "last_organize_ts";
 const SETTING_INITIAL_RELATE_DONE: &str = "initial_relate_done";
+pub const SETTING_AUTO_ORGANIZE: &str = "auto_organize";
+pub const SETTING_AUTO_ORGANIZE_THRESHOLD: &str = "auto_organize_threshold";
+
+/// Unclassified memories required before an automatic pass fires.
+pub const AUTO_ORGANIZE_DEFAULT_THRESHOLD: i64 = 20;
+
+/// Guards against two passes running at once (tray timer vs. manual Organize).
+/// A pass shells out to the `claude` CLI many times, so overlapping runs would
+/// double the API cost and race on the same rows.
+static ORGANIZE_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// True while a pass is in flight.
+pub fn is_running() -> bool {
+    ORGANIZE_RUNNING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// RAII guard so the flag clears on every exit path, including early returns.
+struct RunGuard;
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        ORGANIZE_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl RunGuard {
+    /// Returns `None` if a pass is already running.
+    fn acquire() -> Option<Self> {
+        ORGANIZE_RUNNING
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .ok()
+            .map(|_| RunGuard)
+    }
+}
+
 pub const SETTING_SPLIT_THRESHOLD: &str = "split_threshold";
 const SETTING_SPLIT_LAST_SIZE_PREFIX: &str = "split_last_size:";
 const SETTING_SPLIT_LAST_THRESHOLD_PREFIX: &str = "split_last_threshold:";
@@ -233,6 +274,43 @@ struct SplitSubTopic {
     reason: String,
 }
 
+/// Threshold of unclassified memories that triggers an automatic pass.
+pub fn auto_organize_threshold() -> i64 {
+    settings::get(SETTING_AUTO_ORGANIZE_THRESHOLD, "")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(AUTO_ORGANIZE_DEFAULT_THRESHOLD)
+}
+
+/// Run a pass if auto-organize is on and enough memories are waiting to be
+/// classified. Returns `None` when the trigger conditions aren't met.
+///
+/// Called on a timer by the tray app — the `auto_organize` setting previously
+/// had no effect at all, so unclassified memories accumulated indefinitely and
+/// the `relates-to` edge prune (Phase 5) never ran.
+pub async fn maybe_auto_organize(handle: Option<AppHandle>) -> Option<OrganizerReport> {
+    if !settings::get_bool(SETTING_AUTO_ORGANIZE, false).unwrap_or(false) {
+        return None;
+    }
+    if is_running() {
+        return None;
+    }
+
+    let pending = memories::count_untopiced().unwrap_or(0);
+    if pending < auto_organize_threshold() {
+        return None;
+    }
+
+    match run_full_pass(handle, false).await {
+        Ok(report) => Some(report),
+        Err(e) => {
+            eprintln!("auto-organize failed: {}", e);
+            None
+        }
+    }
+}
+
 /// Run a full organization pass: classify untopiced memories, dedup within topics,
 /// then consolidate overlapping topics.
 ///
@@ -240,9 +318,24 @@ struct SplitSubTopic {
 /// When `force` is true, the split growth guard is bypassed so every over-threshold
 /// topic is re-evaluated regardless of how recently it was last checked.
 pub async fn run_full_pass(handle: Option<AppHandle>, force: bool) -> Result<OrganizerReport, String> {
+    let _guard = match RunGuard::acquire() {
+        Some(g) => g,
+        None => return Err("An organize pass is already running.".to_string()),
+    };
+
     let h = handle.as_ref();
     let mut report = OrganizerReport::default();
     let client = ClaudeClient::new(None);
+
+    // Fail loudly and early if the CLI can't authenticate. Otherwise every
+    // Claude-backed phase fails one by one while the SQL-only phases succeed,
+    // which looks like "organize ran but did nothing".
+    if let Err(e) = client.check_available().await {
+        return Err(format!(
+            "Claude CLI unavailable — organize cannot classify: {}",
+            e
+        ));
+    }
 
     let last_ts: i64 = settings::get(SETTING_LAST_ORGANIZE_TS, "0")
         .unwrap_or_else(|_| "0".to_string())
@@ -1371,6 +1464,21 @@ fn extract_json(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_guard_is_exclusive_and_releases_on_drop() {
+        assert!(!is_running());
+
+        let first = RunGuard::acquire().expect("first acquire should succeed");
+        assert!(is_running());
+        // A second pass (tray timer firing while Organize is mid-run) must be
+        // refused rather than doubling up on `claude` CLI calls.
+        assert!(RunGuard::acquire().is_none());
+
+        drop(first);
+        assert!(!is_running());
+        assert!(RunGuard::acquire().is_some());
+    }
 
     #[test]
     fn test_normalize_topic() {

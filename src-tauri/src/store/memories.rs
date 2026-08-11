@@ -327,6 +327,17 @@ pub fn list_untopiced() -> Result<Vec<Memory>, String> {
     })
 }
 
+/// Number of memories still awaiting classification. Cheap counterpart to
+/// `list_untopiced` for the auto-organize trigger, which only needs the count.
+pub fn count_untopiced() -> Result<i64, String> {
+    with_conn(|conn| {
+        conn.query_row("SELECT COUNT(*) FROM memories WHERE topic IS NULL", [], |r| {
+            r.get(0)
+        })
+        .map_err(|e| e.to_string())
+    })
+}
+
 /// List memories created/updated within a time window (unix timestamps).
 pub fn list_since(since_ts: i64, limit: usize) -> Result<Vec<Memory>, String> {
     with_conn(|conn| {
