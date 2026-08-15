@@ -462,10 +462,35 @@ pub fn search(query: &str, limit: Option<u32>) -> Result<Vec<SearchHit>, String>
     with_conn(|conn| search_with_conn(conn, query, limit))
 }
 
+pub fn search_standing_rules(query: &str, limit: Option<u32>) -> Result<Vec<SearchHit>, String> {
+    with_conn(|conn| search_standing_rules_with_conn(conn, query, limit))
+}
+
 pub fn search_with_conn(
     conn: &Connection,
     query: &str,
     limit: Option<u32>,
+) -> Result<Vec<SearchHit>, String> {
+    search_filtered(conn, query, limit, false)
+}
+
+/// Same search restricted to the types that carry standing instructions.
+/// Retrieval runs this as a second lane: a general query is dominated by the
+/// narrower, more specific wording of project notes, so a rule that governs
+/// the whole question can otherwise miss the candidate pool entirely.
+pub fn search_standing_rules_with_conn(
+    conn: &Connection,
+    query: &str,
+    limit: Option<u32>,
+) -> Result<Vec<SearchHit>, String> {
+    search_filtered(conn, query, limit, true)
+}
+
+fn search_filtered(
+    conn: &Connection,
+    query: &str,
+    limit: Option<u32>,
+    standing_rules_only: bool,
 ) -> Result<Vec<SearchHit>, String> {
     let limit = limit.unwrap_or(10).min(50);
     let sanitized = sanitize_fts_query(query);
@@ -473,17 +498,24 @@ pub fn search_with_conn(
         return Ok(Vec::new());
     }
 
+    let type_clause = if standing_rules_only {
+        "AND m.memory_type IN ('user', 'feedback')"
+    } else {
+        ""
+    };
+
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             r#"SELECT m.id, m.title, m.description, m.topic, m.memory_type, m.project,
                       snippet(memories_fts, 2, '[', ']', '...', 32) as snippet,
                       bm25(memories_fts) as score
                FROM memories_fts
                JOIN memories m ON m.rowid = memories_fts.rowid
-               WHERE memories_fts MATCH ?1 AND m.archived_at IS NULL
+               WHERE memories_fts MATCH ?1 AND m.archived_at IS NULL {}
                ORDER BY score
                LIMIT ?2"#,
-        )
+            type_clause
+        ))
         .map_err(|e| format!("prepare search: {}", e))?;
 
     let rows = stmt

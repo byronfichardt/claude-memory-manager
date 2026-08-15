@@ -11,10 +11,11 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::services::project;
+use crate::services::{project, ranking};
 use crate::store::{edges, memories, repo_edges};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
+const RULES_OVERFETCH: u32 = 3;
 const SERVER_NAME: &str = "claude-memory-manager";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -388,6 +389,19 @@ fn tool_memory_search(args: Value) -> Result<String, String> {
         return Ok(format!("No memories found for query: {}", query));
     }
 
+    if !hits.iter().any(|h| {
+        ranking::is_applicable_standing_rule(
+            h.memory_type.as_deref(),
+            h.project.as_deref(),
+            current_project_ref,
+        )
+    }) {
+        let known: std::collections::HashSet<String> = hits.iter().map(|h| h.id.clone()).collect();
+        if let Ok(rules) = memories::search_standing_rules(query, Some(RULES_OVERFETCH)) {
+            hits.extend(rules.into_iter().filter(|r| !known.contains(&r.id)));
+        }
+    }
+
     // Re-rank by combined (BM25-proxy + affinity). BM25 in FTS5 is negative
     // with lower=better — normalize to a simple rank-based score.
     let n = hits.len() as f64;
@@ -397,30 +411,40 @@ fn tool_memory_search(args: Value) -> Result<String, String> {
         .map(|(i, h)| {
             let bm25_rank_norm = 1.0 - (i as f64 / n.max(1.0)); // top hit = 1.0, bottom ~ 0
             let aff = project::project_affinity(h.project.as_deref(), current_project_ref);
-            (i, bm25_rank_norm + aff)
+            let type_boost = ranking::type_weight(h.memory_type.as_deref());
+            (i, bm25_rank_norm + aff + type_boost)
         })
         .collect();
     indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let final_limit = limit.unwrap_or(10) as usize;
-    let reranked: Vec<memories::SearchHit> = indexed
-        .into_iter()
-        .take(final_limit)
-        .map(|(idx, _)| hits[idx].clone())
+    let eligible: Vec<bool> = indexed
+        .iter()
+        .map(|(idx, _)| {
+            ranking::is_applicable_standing_rule(
+                hits[*idx].memory_type.as_deref(),
+                hits[*idx].project.as_deref(),
+                current_project_ref,
+            )
+        })
         .collect();
+    let reranked: Vec<memories::SearchHit> =
+        ranking::reserve_standing_rule_slot(&eligible, final_limit)
+            .into_iter()
+            .map(|i| hits[indexed[i].0].clone())
+            .collect();
     hits = reranked;
 
     let mut out = format!("Found {} memories for \"{}\":\n\n", hits.len(), query);
+    out.push_str(ranking::PRECEDENCE_NOTE);
+    out.push_str("\n\n");
     for (i, hit) in hits.iter().enumerate() {
-        let scope = match hit.project.as_deref() {
-            None => "global".to_string(),
-            Some(p) => format!("project: {}", short_project(p)),
-        };
+        let tag = ranking::context_tag(hit.memory_type.as_deref(), hit.project.as_deref());
         out.push_str(&format!(
             "{}. [{}] ({}) {}\n   id: {}\n   {}\n   {}\n\n",
             i + 1,
             hit.topic.as_deref().unwrap_or("untopiced"),
-            scope,
+            tag,
             hit.title,
             hit.id,
             hit.description,

@@ -10,4 +10,5 @@ pub mod mcp_server;
 pub mod organizer;
 pub mod portable;
 pub mod project;
+pub mod ranking;
 pub mod scanner;

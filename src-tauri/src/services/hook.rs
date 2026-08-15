@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
-use crate::services::project;
+use crate::services::{project, ranking};
 use crate::store::{self, edges, encountered, memories, repo_edges};
 
 const MAX_RESULTS: u32 = 5;
@@ -121,10 +121,13 @@ pub fn run() -> Result<(), String> {
     if !final_hits.is_empty() {
         out.push_str("<memory-context>\n");
         out.push_str("Relevant memories from your persistent memory store (retrieved automatically):\n\n");
+        out.push_str(ranking::PRECEDENCE_NOTE);
+        out.push_str("\n\n");
 
         for (i, hit) in final_hits.iter().enumerate() {
             let topic = hit.topic.as_deref().unwrap_or("untopiced");
-            out.push_str(&format!("{}. **{}** _{}_", i + 1, hit.title, topic));
+            let tag = ranking::context_tag(hit.memory_type.as_deref(), hit.project.as_deref());
+            out.push_str(&format!("{}. **{}** _{}_ [{}]", i + 1, hit.title, topic, tag));
             if !hit.description.is_empty() {
                 out.push_str(&format!(" — {}", hit.description));
             }
@@ -225,6 +228,7 @@ pub fn run() -> Result<(), String> {
 }
 
 const FTS_OVERFETCH: u32 = 10;
+const RULES_OVERFETCH: u32 = 3;
 const FTS_WEIGHT: f64 = 0.7;
 const GRAPH_WEIGHT: f64 = 0.3;
 const CO_ACCESS_INITIAL_WEIGHT: f64 = 0.1;
@@ -233,31 +237,29 @@ const CO_ACCESS_DELTA: f64 = 0.05;
 /// Hybrid search: FTS5 keyword search + 1-hop graph expansion + re-ranking + project affinity.
 ///
 /// 1. Over-fetch FTS candidates (10 instead of 5)
-/// 2. Walk 1-hop graph neighbors of FTS hits
-/// 3. Fetch any neighbor memories not already in FTS results
-/// 4. Re-rank using combined FTS + graph + project affinity score
-/// 5. Return top MAX_RESULTS
+/// 2. Add a standing-rule-only FTS lane when the pool has none
+/// 3. Walk 1-hop graph neighbors of FTS hits
+/// 4. Fetch any neighbor memories not already in FTS results
+/// 5. Re-rank using combined FTS + graph + project affinity + type score
+/// 6. Return top MAX_RESULTS, reserving a slot for a standing rule
 fn hybrid_search(
     conn: &Connection,
     prompt: &str,
     current_project: Option<&Path>,
 ) -> Result<Vec<memories::SearchHit>, String> {
     // Step 1: Get FTS candidates (over-fetch for re-ranking headroom)
-    let fts_hits = memories::search_with_conn(conn, prompt, Some(FTS_OVERFETCH))
+    let mut fts_hits = memories::search_with_conn(conn, prompt, Some(FTS_OVERFETCH))
         .map_err(|e| format!("search: {}", e))?;
 
     if fts_hits.is_empty() {
         return Ok(fts_hits);
     }
 
+    add_standing_rule_candidates(conn, prompt, current_project, &mut fts_hits);
+
     // Step 2: Get 1-hop graph neighbors
     let fts_ids: Vec<&str> = fts_hits.iter().map(|h| h.id.as_str()).collect();
     let neighbor_edges = edges::get_neighbors_batch_with_conn(conn, &fts_ids).unwrap_or_default();
-
-    // If no edges exist yet, just return the top FTS hits directly
-    if neighbor_edges.is_empty() {
-        return Ok(fts_hits.into_iter().take(MAX_RESULTS as usize).collect());
-    }
 
     // Normalize FTS scores (BM25 in SQLite FTS5: lower = better, all negative)
     let min_score = fts_hits.iter().map(|h| h.score).fold(f64::INFINITY, f64::min);
@@ -336,7 +338,8 @@ fn hybrid_search(
             .map(|(sum, count)| if *count > 0 { sum / *count as f64 } else { 0.0 })
             .unwrap_or(0.0);
         let affinity = project::project_affinity(hit.project.as_deref(), current_project);
-        let combined = FTS_WEIGHT * norm_fts + GRAPH_WEIGHT * g_boost + affinity;
+        let type_boost = ranking::type_weight(hit.memory_type.as_deref());
+        let combined = FTS_WEIGHT * norm_fts + GRAPH_WEIGHT * g_boost + affinity + type_boost;
         scored.push(ScoredHit { hit, combined_score: combined });
     }
 
@@ -350,7 +353,8 @@ fn hybrid_search(
                     .map(|(sum, count)| if *count > 0 { sum / *count as f64 } else { 0.0 })
                     .unwrap_or(0.0);
                 let affinity = project::project_affinity(mem.project.as_deref(), current_project);
-                let combined = GRAPH_WEIGHT * g_boost + affinity; // No FTS signal
+                let type_boost = ranking::type_weight(mem.memory_type.as_deref());
+                let combined = GRAPH_WEIGHT * g_boost + affinity + type_boost; // No FTS signal
 
                 // Convert Memory to SearchHit for uniform output
                 let snippet = truncate_chars(&mem.content, MAX_SNIPPET_CHARS);
@@ -374,14 +378,51 @@ fn hybrid_search(
     // Sort by combined score (descending)
     scored.sort_by(|a, b| b.combined_score.partial_cmp(&a.combined_score).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Return top MAX_RESULTS
-    let results: Vec<memories::SearchHit> = scored
-        .into_iter()
-        .take(MAX_RESULTS as usize)
-        .map(|s| s.hit)
+    let eligible: Vec<bool> = scored
+        .iter()
+        .map(|s| {
+            ranking::is_applicable_standing_rule(
+                s.hit.memory_type.as_deref(),
+                s.hit.project.as_deref(),
+                current_project,
+            )
+        })
         .collect();
 
+    let results: Vec<memories::SearchHit> =
+        ranking::reserve_standing_rule_slot(&eligible, MAX_RESULTS as usize)
+            .into_iter()
+            .map(|i| scored[i].hit.clone())
+            .collect();
+
     Ok(results)
+}
+
+fn add_standing_rule_candidates(
+    conn: &Connection,
+    prompt: &str,
+    current_project: Option<&Path>,
+    candidates: &mut Vec<memories::SearchHit>,
+) {
+    if candidates.iter().any(|h| {
+        ranking::is_applicable_standing_rule(
+            h.memory_type.as_deref(),
+            h.project.as_deref(),
+            current_project,
+        )
+    }) {
+        return;
+    }
+
+    let rules = match memories::search_standing_rules_with_conn(conn, prompt, Some(RULES_OVERFETCH))
+    {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    let known: std::collections::HashSet<String> =
+        candidates.iter().map(|h| h.id.clone()).collect();
+    candidates.extend(rules.into_iter().filter(|r| !known.contains(&r.id)));
 }
 
 fn build_first_encounter_nudge(repo_name: &str, scan_hints: &[repo_edges::ScanProposal]) -> String {
