@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
-use crate::services::project;
+use crate::services::{dedup, project, ranking};
 use crate::store::{self, edges, encountered, memories, repo_edges};
 
 const MAX_RESULTS: u32 = 5;
@@ -98,12 +98,19 @@ pub fn run() -> Result<(), String> {
     // as a deterministic manual memory.
     if let Some(text_to_save) = extract_remember_directive(&event.prompt) {
         match save_user_memory(&conn, text_to_save, active_project.as_deref()) {
-            Ok(title) => {
+            Ok((title, created)) => {
                 out.push_str("<memory-saved>\n");
-                out.push_str(&format!(
-                    "✓ Memory saved automatically via the user's `remember:` directive.\nTitle: {}\n",
-                    title
-                ));
+                if created {
+                    out.push_str(&format!(
+                        "✓ Memory saved automatically via the user's `remember:` directive.\nTitle: {}\n",
+                        title
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "✓ A very similar memory already exists — not saved again.\nTitle: {}\n",
+                        title
+                    ));
+                }
                 out.push_str("You do NOT need to call memory_add for this — it's already saved.\n");
                 out.push_str("Acknowledge the save briefly and proceed with any other part of the user's request.\n");
                 out.push_str("</memory-saved>\n\n");
@@ -121,19 +128,34 @@ pub fn run() -> Result<(), String> {
     if !final_hits.is_empty() {
         out.push_str("<memory-context>\n");
         out.push_str("Relevant memories from your persistent memory store (retrieved automatically):\n\n");
+        out.push_str(ranking::PRECEDENCE_NOTE);
+        out.push_str("\n\n");
+
+        let contradiction_map = contradictions_for(&conn, &final_hits);
 
         for (i, hit) in final_hits.iter().enumerate() {
             let topic = hit.topic.as_deref().unwrap_or("untopiced");
-            out.push_str(&format!("{}. **{}** _{}_", i + 1, hit.title, topic));
+            let tag = ranking::context_tag(hit.memory_type.as_deref(), hit.project.as_deref());
+            out.push_str(&format!("{}. **{}** _{}_ [{}]", i + 1, hit.title, topic, tag));
             if !hit.description.is_empty() {
                 out.push_str(&format!(" — {}", hit.description));
             }
             out.push('\n');
 
             let snippet = clean_snippet(&hit.snippet);
-            if !snippet.is_empty() {
-                let truncated = truncate_chars(&snippet, MAX_SNIPPET_CHARS);
-                out.push_str(&format!("   {}\n", truncated));
+            let body = ranking::inject_body(
+                hit.memory_type.as_deref(),
+                &hit.content,
+                &truncate_chars(&snippet, MAX_SNIPPET_CHARS),
+            );
+            if !body.is_empty() {
+                out.push_str(&format!("   {}\n", body));
+            }
+            if let Some(warning) = ranking::contradiction_line(
+                contradiction_map.get(&hit.id).map(|v| v.as_slice()).unwrap_or(&[]),
+            ) {
+                out.push_str(&warning);
+                out.push('\n');
             }
             out.push('\n');
         }
@@ -195,10 +217,10 @@ pub fn run() -> Result<(), String> {
             }
         }
 
-        // Strengthen co-access edges between results — one batched upsert
-        // inside a single transaction instead of 2×N² sequential writes.
+        // Usage + co-access only for memories Claude actually saw.
+        let ids: Vec<&str> = final_hits.iter().map(|h| h.id.as_str()).collect();
+        memories::bump_access_counts(&conn, &ids);
         if final_hits.len() > 1 {
-            let ids: Vec<&str> = final_hits.iter().map(|h| h.id.as_str()).collect();
             let _ = edges::strengthen_co_access_batch(
                 &conn,
                 &ids,
@@ -225,39 +247,40 @@ pub fn run() -> Result<(), String> {
 }
 
 const FTS_OVERFETCH: u32 = 10;
-const FTS_WEIGHT: f64 = 0.7;
-const GRAPH_WEIGHT: f64 = 0.3;
+const RULES_OVERFETCH: u32 = 3;
 const CO_ACCESS_INITIAL_WEIGHT: f64 = 0.1;
 const CO_ACCESS_DELTA: f64 = 0.05;
 
 /// Hybrid search: FTS5 keyword search + 1-hop graph expansion + re-ranking + project affinity.
 ///
 /// 1. Over-fetch FTS candidates (10 instead of 5)
-/// 2. Walk 1-hop graph neighbors of FTS hits
-/// 3. Fetch any neighbor memories not already in FTS results
-/// 4. Re-rank using combined FTS + graph + project affinity score
-/// 5. Return top MAX_RESULTS
+/// 2. Add a standing-rule-only FTS lane when the pool has none
+/// 3. Walk 1-hop graph neighbors of FTS hits
+/// 4. Fetch any neighbor memories not already in FTS results
+/// 5. Re-rank using combined FTS + graph + project affinity + type score
+/// 6. Return top MAX_RESULTS, reserving a slot for a standing rule
 fn hybrid_search(
     conn: &Connection,
     prompt: &str,
     current_project: Option<&Path>,
 ) -> Result<Vec<memories::SearchHit>, String> {
     // Step 1: Get FTS candidates (over-fetch for re-ranking headroom)
-    let fts_hits = memories::search_with_conn(conn, prompt, Some(FTS_OVERFETCH))
+    let mut fts_hits = memories::search_with_conn(conn, prompt, Some(FTS_OVERFETCH))
         .map_err(|e| format!("search: {}", e))?;
 
     if fts_hits.is_empty() {
         return Ok(fts_hits);
     }
 
+    add_standing_rule_candidates(conn, prompt, current_project, &mut fts_hits);
+
     // Step 2: Get 1-hop graph neighbors
     let fts_ids: Vec<&str> = fts_hits.iter().map(|h| h.id.as_str()).collect();
-    let neighbor_edges = edges::get_neighbors_batch_with_conn(conn, &fts_ids).unwrap_or_default();
-
-    // If no edges exist yet, just return the top FTS hits directly
-    if neighbor_edges.is_empty() {
-        return Ok(fts_hits.into_iter().take(MAX_RESULTS as usize).collect());
-    }
+    let neighbor_edges: Vec<_> = edges::get_neighbors_batch_with_conn(conn, &fts_ids)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| ranking::graph_edge_usable(&e.edge_type, e.weight))
+        .collect();
 
     // Normalize FTS scores (BM25 in SQLite FTS5: lower = better, all negative)
     let min_score = fts_hits.iter().map(|h| h.score).fold(f64::INFINITY, f64::min);
@@ -328,6 +351,8 @@ fn hybrid_search(
 
     let mut scored: Vec<ScoredHit> = Vec::new();
 
+    let now = chrono::Utc::now().timestamp();
+
     // Score FTS hits
     for hit in fts_hits {
         let norm_fts = normalize_fts(hit.score);
@@ -335,8 +360,16 @@ fn hybrid_search(
             .get(&hit.id)
             .map(|(sum, count)| if *count > 0 { sum / *count as f64 } else { 0.0 })
             .unwrap_or(0.0);
-        let affinity = project::project_affinity(hit.project.as_deref(), current_project);
-        let combined = FTS_WEIGHT * norm_fts + GRAPH_WEIGHT * g_boost + affinity;
+        let combined = ranking::combined_score(
+            norm_fts,
+            hit.memory_type.as_deref(),
+            hit.project.as_deref(),
+            current_project,
+            g_boost,
+            hit.access_count,
+            hit.updated_at,
+            now,
+        );
         scored.push(ScoredHit { hit, combined_score: combined });
     }
 
@@ -349,8 +382,16 @@ fn hybrid_search(
                     .get(&mem.id)
                     .map(|(sum, count)| if *count > 0 { sum / *count as f64 } else { 0.0 })
                     .unwrap_or(0.0);
-                let affinity = project::project_affinity(mem.project.as_deref(), current_project);
-                let combined = GRAPH_WEIGHT * g_boost + affinity; // No FTS signal
+                let combined = ranking::combined_score(
+                    0.0,
+                    mem.memory_type.as_deref(),
+                    mem.project.as_deref(),
+                    current_project,
+                    g_boost,
+                    mem.access_count,
+                    mem.updated_at,
+                    now,
+                );
 
                 // Convert Memory to SearchHit for uniform output
                 let snippet = truncate_chars(&mem.content, MAX_SNIPPET_CHARS);
@@ -364,6 +405,9 @@ fn hybrid_search(
                         memory_type: mem.memory_type,
                         project: mem.project,
                         score: 0.0, // no FTS score
+                        access_count: mem.access_count,
+                        updated_at: mem.updated_at,
+                        content: mem.content,
                     },
                     combined_score: combined,
                 });
@@ -374,14 +418,124 @@ fn hybrid_search(
     // Sort by combined score (descending)
     scored.sort_by(|a, b| b.combined_score.partial_cmp(&a.combined_score).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Return top MAX_RESULTS
-    let results: Vec<memories::SearchHit> = scored
-        .into_iter()
-        .take(MAX_RESULTS as usize)
-        .map(|s| s.hit)
+    let eligible: Vec<bool> = scored
+        .iter()
+        .map(|s| {
+            ranking::is_applicable_standing_rule(
+                s.hit.memory_type.as_deref(),
+                s.hit.project.as_deref(),
+                current_project,
+            )
+        })
         .collect();
 
+    let mut results: Vec<memories::SearchHit> = Vec::new();
+    for i in ranking::reserve_standing_rule_slot(&eligible, MAX_RESULTS as usize) {
+        let keep_anyway = eligible[i];
+        if !keep_anyway && scored[i].combined_score < ranking::MIN_INJECT_SCORE {
+            continue;
+        }
+        results.push(scored[i].hit.clone());
+    }
+
+    // Standing rules first so Claude reads the instruction before project notes.
+    results.sort_by(|a, b| {
+        ranking::is_standing_rule(b.memory_type.as_deref())
+            .cmp(&ranking::is_standing_rule(a.memory_type.as_deref()))
+    });
+
     Ok(results)
+}
+
+fn contradictions_for(
+    conn: &Connection,
+    hits: &[memories::SearchHit],
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut out: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    if hits.is_empty() {
+        return out;
+    }
+    let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+    let edges = match edges::get_neighbors_batch_with_conn(conn, &ids) {
+        Ok(e) => e,
+        Err(_) => return out,
+    };
+    let hit_titles: std::collections::HashMap<&str, &str> = hits
+        .iter()
+        .map(|h| (h.id.as_str(), h.title.as_str()))
+        .collect();
+
+    let mut other_ids: Vec<String> = Vec::new();
+    for edge in &edges {
+        if edge.edge_type != "contradicts" {
+            continue;
+        }
+        for end in [&edge.source_id, &edge.target_id] {
+            if !hit_titles.contains_key(end.as_str()) && !other_ids.contains(end) {
+                other_ids.push(end.clone());
+            }
+        }
+    }
+    let other_refs: Vec<&str> = other_ids.iter().map(|s| s.as_str()).collect();
+    let others = memories::get_by_ids_with_conn(conn, &other_refs).unwrap_or_default();
+    let other_titles: std::collections::HashMap<String, String> = others
+        .into_iter()
+        .map(|m| (m.id, m.title))
+        .collect();
+
+    for edge in &edges {
+        if edge.edge_type != "contradicts" {
+            continue;
+        }
+        let src = edge.source_id.as_str();
+        let tgt = edge.target_id.as_str();
+        if hit_titles.contains_key(src) {
+            let title = hit_titles
+                .get(tgt)
+                .copied()
+                .map(str::to_string)
+                .or_else(|| other_titles.get(tgt).cloned())
+                .unwrap_or_else(|| tgt.to_string());
+            out.entry(src.to_string()).or_default().push(title);
+        }
+        if hit_titles.contains_key(tgt) {
+            let title = hit_titles
+                .get(src)
+                .copied()
+                .map(str::to_string)
+                .or_else(|| other_titles.get(src).cloned())
+                .unwrap_or_else(|| src.to_string());
+            out.entry(tgt.to_string()).or_default().push(title);
+        }
+    }
+    out
+}
+
+fn add_standing_rule_candidates(
+    conn: &Connection,
+    prompt: &str,
+    current_project: Option<&Path>,
+    candidates: &mut Vec<memories::SearchHit>,
+) {
+    if candidates.iter().any(|h| {
+        ranking::is_applicable_standing_rule(
+            h.memory_type.as_deref(),
+            h.project.as_deref(),
+            current_project,
+        )
+    }) {
+        return;
+    }
+
+    let rules = match memories::search_standing_rules_with_conn(conn, prompt, Some(RULES_OVERFETCH))
+    {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    let known: std::collections::HashSet<String> =
+        candidates.iter().map(|h| h.id.clone()).collect();
+    candidates.extend(rules.into_iter().filter(|r| !known.contains(&r.id)));
 }
 
 fn build_first_encounter_nudge(repo_name: &str, scan_hints: &[repo_edges::ScanProposal]) -> String {
@@ -559,12 +713,16 @@ fn save_user_memory(
     conn: &Connection,
     text: String,
     active_project: Option<&Path>,
-) -> Result<String, String> {
+) -> Result<(String, bool), String> {
     let title = derive_title(&text);
     let description = String::new();
 
     let memory_type = Some("user".to_string());
     let project = project::resolve_memory_scope(memory_type.as_deref(), None, active_project);
+
+    if let Ok(Some(existing)) = dedup::existing_near_duplicate(&title, &text, project.as_deref()) {
+        return Ok((existing.title, false));
+    }
 
     let memory = memories::insert_with_conn(
         conn,
@@ -579,7 +737,7 @@ fn save_user_memory(
         },
     )?;
 
-    Ok(memory.title)
+    Ok((memory.title, true))
 }
 
 fn derive_title(text: &str) -> String {

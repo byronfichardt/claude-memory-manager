@@ -1,5 +1,6 @@
 pub mod bootstrap;
 pub mod claude_api;
+pub mod dedup;
 pub mod dreamer;
 pub mod embeddings;
 pub mod frontmatter;
@@ -10,4 +11,5 @@ pub mod mcp_server;
 pub mod organizer;
 pub mod portable;
 pub mod project;
+pub mod ranking;
 pub mod scanner;
