@@ -1,11 +1,11 @@
 {
-  "version": "0.4.6",
-  "notes": "Fixes the organizer failing to classify memories, and adds automatic organize when 20+ memories are unclassified.",
-  "pub_date": "2026-08-11T07:22:24Z",
+  "version": "0.4.7",
+  "notes": "Tighter recall (FTS sanitizer, standing-rule ranking) and store-wide near-dup clustering. Opposite repo rules are not merged.",
+  "pub_date": "2026-08-19T13:16:05Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRHFEeHEvREVDc2U5QTZsQVVxOW1LaitCK085SjBRWmxGZGRYNzJyeU42Zi8wL1E2VkZNelRrL0hwZ3J2a0FzMWJEbThMVVJlQkdwSUxvRW43TVJtWFFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NDMyOTMzCWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKUGxybEQzbUdCYjkvdmlvYjRXdkc4TFpoS3VlbDRFby9zRHBDUUh1SjNnT0psS1F1c0xSUFlEUEhnaHRxZFRXYVdMNmQvS0ZlSVkwUmg5Unl4TGpVQ1E9PQo=",
-      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.6/Claude.Memory.Manager.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRGhLanZmVUFTNlNHY3lBWjJyNmJlQ3RTaUJXVzZ2NEw0SU8xRnpIUkhtUFh6aXJOSzVFOE94ZVBMT2hKbStxcFZEMFhMS1RFRll2OFN1WmtTTEUwY1FFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3MTQyNDUwCWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKVExIYTQ1OVk4OXVsYTJ1KzMwM1lhdWY3Tmo2UFBQWWN2UmtybkhpdjBhc3RQamZaT0lGODhhRjBOajJuT29aN0IzMVBwazI3SU1iOVROUzcwdXI1QlE9PQo=",
+      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.7/Claude.Memory.Manager.app.tar.gz"
     }
   }
 }
