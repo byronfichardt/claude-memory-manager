@@ -32,6 +32,12 @@ pub struct SearchHit {
     pub memory_type: Option<String>,
     pub project: Option<String>,
     pub score: f64,
+    #[serde(default)]
+    pub access_count: i64,
+    #[serde(default)]
+    pub updated_at: i64,
+    #[serde(default)]
+    pub content: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,7 +121,12 @@ pub fn insert_with_conn(conn: &Connection, new: NewMemory) -> Result<Memory, Str
     )
     .map_err(|e| format!("insert: {}", e))?;
 
-    get_by_id(conn, &id)?.ok_or_else(|| "insert succeeded but row missing".to_string())
+    let created = get_by_id(conn, &id)?.ok_or_else(|| "insert succeeded but row missing".to_string())?;
+    crate::services::embeddings::queue_memory(
+        &created.id,
+        &format!("{} {}", created.title, created.content),
+    );
+    Ok(created)
 }
 
 fn find_by_hash(conn: &Connection, hash: &str) -> Result<Option<Memory>, String> {
@@ -174,7 +185,12 @@ pub fn update(
         // Flag connected memories for staleness review
         flag_dependents_for_review(id);
 
-        get_by_id(conn, id)?.ok_or_else(|| format!("memory {} not found after update", id))
+        let updated = get_by_id(conn, id)?.ok_or_else(|| format!("memory {} not found after update", id))?;
+        crate::services::embeddings::queue_memory(
+            &updated.id,
+            &format!("{} {}", updated.title, updated.content),
+        );
+        Ok(updated)
     })
 }
 
@@ -507,6 +523,7 @@ fn search_filtered(
     let mut stmt = conn
         .prepare(&format!(
             r#"SELECT m.id, m.title, m.description, m.topic, m.memory_type, m.project,
+                      m.access_count, m.updated_at, m.content,
                       snippet(memories_fts, 2, '[', ']', '...', 32) as snippet,
                       bm25(memories_fts) as score
                FROM memories_fts
@@ -529,6 +546,9 @@ fn search_filtered(
                 project: row.get("project")?,
                 snippet: row.get("snippet")?,
                 score: row.get("score")?,
+                access_count: row.get("access_count")?,
+                updated_at: row.get("updated_at")?,
+                content: row.get("content")?,
             })
         })
         .map_err(|e| format!("query search: {}", e))?;
@@ -538,18 +558,22 @@ fn search_filtered(
         hits.push(r.map_err(|e| e.to_string())?);
     }
 
-    if !hits.is_empty() {
-        let hit_ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
-        bump_access_counts(conn, &hit_ids);
-    }
-
     Ok(hits)
 }
 
 /// Increment `access_count` for a batch of memories in a single statement.
+/// Call this only for memories that were actually injected or returned to
+/// Claude — not the FTS over-fetch pool.
 /// Best-effort — errors are swallowed (missing counter updates are not fatal
 /// and we don't want to fail retrieval on a write hiccup).
-fn bump_access_counts(conn: &Connection, ids: &[&str]) {
+pub fn bump_access(ids: &[&str]) -> Result<(), String> {
+    with_conn(|conn| {
+        bump_access_counts(conn, ids);
+        Ok(())
+    })
+}
+
+pub(crate) fn bump_access_counts(conn: &Connection, ids: &[&str]) {
     if ids.is_empty() {
         return;
     }
@@ -568,19 +592,180 @@ mod tests {
     #[test]
     fn test_sanitize_fts_query() {
         assert_eq!(sanitize_fts_query(""), "");
-        assert_eq!(sanitize_fts_query("docker"), "docker*");
-        // Multi-word queries use OR so partial matches work (FTS5 defaults to AND)
-        assert_eq!(sanitize_fts_query("docker deploy"), "docker* OR deploy*");
+        assert_eq!(sanitize_fts_query("docker"), "\"docker\"*");
+        assert_eq!(
+            sanitize_fts_query("docker deploy"),
+            "\"deploy\"* OR \"docker\"*"
+        );
         assert_eq!(
             sanitize_fts_query("docker; DROP TABLE"),
-            "docker* OR DROP* OR TABLE*"
+            "\"docker\"* OR \"table\"* OR \"drop\"*"
         );
-        // Single-char words filtered
-        assert_eq!(sanitize_fts_query("a docker"), "docker*");
-        // Multi-word natural language uses OR across all terms > 1 char
+        assert_eq!(sanitize_fts_query("a docker"), "\"docker\"*");
+        // Natural-language stopwords are dropped so BM25 is not run over the
+        // whole corpus. Legacy kept every token (see proof test below).
         assert_eq!(
             sanitize_fts_query("what do you use for postgres"),
-            "what* OR do* OR you* OR use* OR for* OR postgres*"
+            "\"postgres\"*"
+        );
+        // Hyphens become spaces — FTS5 would otherwise treat "red-roof" as a
+        // column filter (`no such column: roof`).
+        let hyphen = sanitize_fts_query("red-roof tiles");
+        assert!(
+            !hyphen.contains('-'),
+            "hyphen must not survive as an operator: {hyphen}"
+        );
+        assert!(hyphen.contains("red") || hyphen.contains("roof"));
+        // Short technical tokens stay exact (no prefix wildcard).
+        assert_eq!(sanitize_fts_query("wal e2e"), "\"e2e\" OR \"wal\"");
+    }
+
+    #[test]
+    fn proof_new_sanitizer_drops_stopwords_legacy_does_not() {
+        let prompt = "what do you use for postgres";
+        let legacy = sanitize_fts_query_legacy(prompt);
+        let next = sanitize_fts_query(prompt);
+        assert!(
+            legacy.contains("what*") && legacy.contains("you*") && legacy.contains("for*"),
+            "legacy baseline drifted: {legacy}"
+        );
+        assert_eq!(next, "\"postgres\"*");
+        assert!(
+            next.split(" OR ").count() < legacy.split(" OR ").count(),
+            "new query must be stricter than legacy"
+        );
+    }
+
+    #[test]
+    fn proof_hyphenated_query_is_valid_fts_legacy_is_not() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                content TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                memory_type TEXT,
+                topic TEXT,
+                source TEXT,
+                project TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                access_count INTEGER NOT NULL DEFAULT 0,
+                archived_at INTEGER
+            );
+            CREATE VIRTUAL TABLE memories_fts USING fts5(
+                title, description, content,
+                content='memories', content_rowid='rowid',
+                tokenize='porter unicode61'
+            );
+            CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+                INSERT INTO memories_fts(rowid, title, description, content)
+                VALUES (new.rowid, new.title, new.description, new.content);
+            END;
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, title, description, content, content_hash, created_at, updated_at)
+             VALUES ('1', 'Red roof tiles', '', 'The cottage uses red-roof clay tiles', 'h', 0, 0)",
+            [],
+        )
+        .unwrap();
+
+        let legacy_err = conn
+            .prepare("SELECT m.id FROM memories_fts JOIN memories m ON m.rowid = memories_fts.rowid WHERE memories_fts MATCH ?1")
+            .and_then(|mut stmt| {
+                stmt.query_row([sanitize_fts_query_legacy("red-roof")], |r| {
+                    r.get::<_, String>(0)
+                })
+            })
+            .expect_err("legacy hyphen query must fail FTS parse");
+        assert!(
+            legacy_err.to_string().contains("no such column")
+                || legacy_err.to_string().to_lowercase().contains("syntax"),
+            "unexpected legacy error: {legacy_err}"
+        );
+
+        let mut stmt = conn
+            .prepare("SELECT m.id FROM memories_fts JOIN memories m ON m.rowid = memories_fts.rowid WHERE memories_fts MATCH ?1")
+            .unwrap();
+        let id: String = stmt
+            .query_row([sanitize_fts_query("red-roof")], |r| r.get(0))
+            .expect("new hyphen query must be valid FTS");
+        assert_eq!(id, "1");
+    }
+
+    #[test]
+    fn proof_stopword_or_matches_almost_everything_new_does_not() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                content TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                memory_type TEXT,
+                topic TEXT,
+                source TEXT,
+                project TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                access_count INTEGER NOT NULL DEFAULT 0,
+                archived_at INTEGER
+            );
+            CREATE VIRTUAL TABLE memories_fts USING fts5(
+                title, description, content,
+                content='memories', content_rowid='rowid',
+                tokenize='porter unicode61'
+            );
+            CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+                INSERT INTO memories_fts(rowid, title, description, content)
+                VALUES (new.rowid, new.title, new.description, new.content);
+            END;
+            "#,
+        )
+        .unwrap();
+
+        let rows = [
+            ("pg", "Postgres port", "Production postgres listens on 5432"),
+            ("dk", "Docker notes", "We use docker compose for staging"),
+            ("ui", "Button copy", "You can change this later if you want"),
+            ("gh", "Git habit", "What we do for PRs is squash"),
+            ("xx", "Unrelated", "The cat sat on the mat and you can see it"),
+        ];
+        for (id, title, content) in rows {
+            conn.execute(
+                "INSERT INTO memories (id, title, description, content, content_hash, created_at, updated_at)
+                 VALUES (?1, ?2, '', ?3, ?1, 0, 0)",
+                rusqlite::params![id, title, content],
+            )
+            .unwrap();
+        }
+
+        let prompt = "what do you use for postgres";
+        let count = |q: &str| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM memories_fts JOIN memories m ON m.rowid = memories_fts.rowid WHERE memories_fts MATCH ?1",
+                [q],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        let legacy_hits = count(&sanitize_fts_query_legacy(prompt));
+        let new_hits = count(&sanitize_fts_query(prompt));
+        assert!(
+            legacy_hits >= 4,
+            "legacy OR-of-stopwords should flood the corpus, got {legacy_hits}"
+        );
+        assert_eq!(
+            new_hits, 1,
+            "new sanitizer should keep only the postgres row, got {new_hits}"
         );
     }
 
@@ -591,14 +776,88 @@ mod tests {
     }
 }
 
+/// Words that match almost every English memory. OR-ing them with a prefix
+/// wildcard makes BM25 rank the whole corpus. Kept small and ASCII-only —
+/// technical tokens (`wal`, `e2e`, `k8s`) are never on this list.
+const FTS_STOPWORDS: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "do", "for",
+    "from", "had", "has", "have", "how", "i", "if", "in", "into", "is", "it",
+    "its", "me", "my", "no", "not", "of", "on", "or", "our", "so", "than",
+    "that", "the", "then", "there", "this", "to", "too", "up", "us", "use",
+    "used", "using", "was", "we", "were", "what", "when", "where", "which",
+    "who", "why", "will", "with", "would", "you", "your",
+];
+
+const FTS_MAX_TERMS: usize = 12;
+const FTS_PREFIX_MIN_LEN: usize = 4;
+
 /// Escape/sanitize a user query for FTS5.
 ///
-/// - Strips special chars (SQL injection / FTS operator safety)
-/// - Filters single-char noise
-/// - Wraps each word with a prefix-match wildcard
-/// - Joins with `OR` (FTS5 defaults to AND — we want forgiving recall, let
-///   bm25 rank by match count/quality)
-fn sanitize_fts_query(input: &str) -> String {
+/// - Hyphens become spaces so `red-roof` cannot be parsed as a column filter
+/// - Stopwords and 1-char tokens are dropped
+/// - At most `FTS_MAX_TERMS` tokens, preferring longer / rarer-looking words
+/// - Prefix `*` only on tokens ≥ 4 chars; short tokens stay exact
+/// - Each token is quoted so leftover punctuation cannot become an operator
+/// - Joins with `OR` (FTS5 defaults to AND — we want forgiving recall)
+pub(crate) fn sanitize_fts_query(input: &str) -> String {
+    let cleaned: String = input
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c.is_whitespace() || c == '_' {
+                c
+            } else {
+                // Including '-': FTS5 treats `foo-bar` as a column filter.
+                ' '
+            }
+        })
+        .collect();
+
+    let mut seen = std::collections::HashSet::new();
+    let mut words: Vec<String> = Vec::new();
+    for raw in cleaned.split_whitespace() {
+        let w = raw.to_ascii_lowercase();
+        if w.len() <= 1 || FTS_STOPWORDS.contains(&w.as_str()) {
+            continue;
+        }
+        if seen.insert(w.clone()) {
+            words.push(w);
+        }
+    }
+    if words.is_empty() {
+        return String::new();
+    }
+
+    words.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    words.truncate(FTS_MAX_TERMS);
+
+    let terms: Vec<String> = words
+        .into_iter()
+        .map(|w| {
+            if w.len() >= FTS_PREFIX_MIN_LEN {
+                format_fts_term(&format!("{w}*"))
+            } else {
+                format_fts_term(&w)
+            }
+        })
+        .collect();
+
+    terms.join(" OR ")
+}
+
+fn format_fts_term(term: &str) -> String {
+    // Quote every token. FTS5 quoted-prefix (`"postgres"*`) is valid and
+    // prevents leftover punctuation from becoming an operator.
+    if let Some(stripped) = term.strip_suffix('*') {
+        format!("\"{}\"*", stripped.replace('"', ""))
+    } else {
+        format!("\"{}\"", term.replace('"', ""))
+    }
+}
+
+/// Pre-2026-08 sanitizer, kept only so proof tests can lock the regression
+/// the new function is supposed to fix. Do not call from production paths.
+#[cfg(test)]
+pub(crate) fn sanitize_fts_query_legacy(input: &str) -> String {
     let cleaned: String = input
         .chars()
         .map(|c| {

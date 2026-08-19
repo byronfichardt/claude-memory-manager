@@ -1,14 +1,44 @@
-//! Type-based half of the recall score, plus the labels that expose scope and
-//! kind to Claude at recall time. The project-based half lives in
-//! `project::project_affinity`.
+//! Recall scoring and the labels that expose scope / kind to Claude.
+//!
+//! Combined score (hook + MCP re-rank):
+//!   0.45 * bm25_norm
+//! + type_weight            (0.45 for user/feedback, else 0)
+//! + project_affinity       (+0.40 / +0.15 / 0 / −0.20)
+//! + 0.10 * graph_boost     (only usable edges — see `graph_edge_usable`)
+//! + 0.05 * usage_score     (log-scaled access_count of this memory)
+//! + 0.05 * recency_score   (half-life ~75 days)
 
 use std::path::Path;
 
-/// Sized against `project::PROJECT_AFFINITY_EXACT` (0.40): without it, a
-/// same-project note outscores a global standing rule by the full affinity
-/// gap on scope alone, so a one-off exception saved inside a repo buries the
-/// rule it contradicts.
-pub const TYPE_WEIGHT_RULE: f64 = 0.25;
+use crate::services::project;
+
+/// Sized just above `project::PROJECT_AFFINITY_EXACT` (0.40) so a global
+/// standing rule beats a same-project note when lexical relevance is equal.
+/// The reserved slot still covers the case where the note also wins BM25.
+pub const TYPE_WEIGHT_RULE: f64 = 0.45;
+
+/// Pre-change type weight, locked for proof tests.
+#[cfg(test)]
+const TYPE_WEIGHT_RULE_LEGACY: f64 = 0.25;
+
+pub const W_BM25: f64 = 0.45;
+pub const W_GRAPH: f64 = 0.10;
+pub const W_USAGE: f64 = 0.05;
+pub const W_RECENCY: f64 = 0.05;
+
+/// Co-access seeds at 0.1; only pairs retrieved ~3+ times clear this floor.
+pub const GRAPH_MIN_WEIGHT: f64 = 0.2;
+
+/// ~75 days. A memory updated today scores 1.0; one last touched 75 days
+/// ago scores 0.5. Unknown timestamps get a neutral 0.5.
+pub const RECENCY_HALF_LIFE_SECS: f64 = 75.0 * 24.0 * 3600.0;
+
+/// Drop non-rule candidates below this after scoring. Stops the hook from
+/// injecting five weakly related notes just because FTS returned something.
+pub const MIN_INJECT_SCORE: f64 = 0.20;
+
+/// Standing-rule body injected in full, not as an FTS snippet.
+pub const STANDING_RULE_CONTENT_CHARS: usize = 800;
 
 pub fn is_standing_rule(memory_type: Option<&str>) -> bool {
     matches!(memory_type, Some("user") | Some("feedback"))
@@ -94,10 +124,97 @@ takes precedence over a \"project note\", which is incidental context captured w
 repo. A project note is never permission to drop a standing rule — if they conflict, follow the \
 standing rule and ask before deviating.";
 
+/// True for edges that should influence recall. Weak co-access `relates-to`
+/// and `contradicts` edges are excluded: the former is noise, the latter is
+/// a warning (see `contradiction_line`) not a relevance boost.
+pub fn graph_edge_usable(edge_type: &str, weight: f64) -> bool {
+    weight + f64::EPSILON >= GRAPH_MIN_WEIGHT
+        && matches!(edge_type, "relates-to" | "depends-on" | "supersedes")
+}
+
+pub fn usage_score(access_count: i64) -> f64 {
+    let n = access_count.max(0) as f64;
+    (1.0 + n).ln() / (201.0_f64).ln()
+}
+
+pub fn recency_score(updated_at: i64, now: i64) -> f64 {
+    if updated_at <= 0 {
+        return 0.5;
+    }
+    let age = (now - updated_at).max(0) as f64;
+    0.5_f64.powf(age / RECENCY_HALF_LIFE_SECS)
+}
+
+pub fn combined_score(
+    bm25_norm: f64,
+    memory_type: Option<&str>,
+    memory_project: Option<&str>,
+    current_project: Option<&Path>,
+    graph_boost: f64,
+    access_count: i64,
+    updated_at: i64,
+    now: i64,
+) -> f64 {
+    W_BM25 * bm25_norm
+        + type_weight(memory_type)
+        + project::project_affinity(memory_project, current_project)
+        + W_GRAPH * graph_boost
+        + W_USAGE * usage_score(access_count)
+        + W_RECENCY * recency_score(updated_at, now)
+}
+
+/// Pre-change score: `0.7*bm25 + 0.3*graph + affinity + 0.25 type`.
+/// Kept so proof tests can show the new function flips the cases we care about.
+#[cfg(test)]
+pub fn combined_score_legacy(
+    bm25_norm: f64,
+    memory_type: Option<&str>,
+    memory_project: Option<&str>,
+    current_project: Option<&Path>,
+    graph_boost: f64,
+) -> f64 {
+    let type_boost = if is_standing_rule(memory_type) {
+        TYPE_WEIGHT_RULE_LEGACY
+    } else {
+        0.0
+    };
+    0.7 * bm25_norm
+        + 0.3 * graph_boost
+        + project::project_affinity(memory_project, current_project)
+        + type_boost
+}
+
+/// Body shown in `<memory-context>`. Standing rules keep the instruction;
+/// everything else stays a short snippet.
+pub fn inject_body(memory_type: Option<&str>, content: &str, snippet: &str) -> String {
+    if is_standing_rule(memory_type) && !content.trim().is_empty() {
+        truncate_chars(content.trim(), STANDING_RULE_CONTENT_CHARS)
+    } else {
+        snippet.to_string()
+    }
+}
+
+pub fn contradiction_line(titles: &[String]) -> Option<String> {
+    if titles.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "   ⚠ contradicts: {}",
+        titles.join("; ")
+    ))
+}
+
+fn truncate_chars(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        format!("{}...", s.chars().take(n).collect::<String>())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::project;
 
     #[test]
     fn rules_outrank_notes_on_type() {
@@ -109,18 +226,120 @@ mod tests {
     }
 
     #[test]
-    fn global_rule_survives_a_same_project_note_with_equal_relevance() {
+    fn global_rule_beats_same_project_note_when_relevance_is_equal() {
         let repo = Path::new("/Users/byron/projects/personal/aethermon");
+        let now = 1_700_000_000;
 
-        let rule = type_weight(Some("feedback")) + project::project_affinity(None, Some(repo));
-        let note = type_weight(Some("project"))
-            + project::project_affinity(Some("/Users/byron/projects/personal/aethermon"), Some(repo));
-
-        assert!(note > rule, "a same-project note still wins on scope alone");
-        assert!(
-            note - rule < project::PROJECT_AFFINITY_EXACT,
-            "but the gap must be narrow enough for keyword relevance to decide"
+        let rule = combined_score(1.0, Some("feedback"), None, Some(repo), 0.0, 0, now, now);
+        let note = combined_score(
+            1.0,
+            Some("project"),
+            Some("/Users/byron/projects/personal/aethermon"),
+            Some(repo),
+            0.0,
+            0,
+            now,
+            now,
         );
+
+        assert!(
+            rule > note,
+            "equal BM25: standing rule must beat same-project note ({rule} vs {note})"
+        );
+    }
+
+    #[test]
+    fn proof_legacy_score_buries_the_rule_new_score_does_not() {
+        let repo = Path::new("/Users/byron/projects/personal/aethermon");
+        let now = 1_700_000_000;
+        let note_project = Some("/Users/byron/projects/personal/aethermon");
+
+        let legacy_rule =
+            combined_score_legacy(1.0, Some("feedback"), None, Some(repo), 0.0);
+        let legacy_note =
+            combined_score_legacy(1.0, Some("project"), note_project, Some(repo), 0.0);
+        assert!(
+            legacy_note > legacy_rule,
+            "legacy baseline drifted — note should still win on +0.40 affinity vs +0.25 type ({legacy_note} vs {legacy_rule})"
+        );
+
+        let next_rule = combined_score(1.0, Some("feedback"), None, Some(repo), 0.0, 0, now, now);
+        let next_note = combined_score(
+            1.0,
+            Some("project"),
+            note_project,
+            Some(repo),
+            0.0,
+            0,
+            now,
+            now,
+        );
+        assert!(
+            next_rule > next_note,
+            "new score must flip the equal-relevance case ({next_rule} vs {next_note})"
+        );
+    }
+
+    #[test]
+    fn proof_usage_and_recency_break_a_bm25_tie_legacy_cannot() {
+        let repo = Path::new("/Users/byron/projects/personal/aethermon");
+        let now = 1_700_000_000;
+        let stale = now - (180 * 24 * 3600);
+
+        let legacy_hot =
+            combined_score_legacy(0.8, Some("project"), Some("/Users/byron/projects/personal/aethermon"), Some(repo), 0.0);
+        let legacy_cold =
+            combined_score_legacy(0.8, Some("project"), Some("/Users/byron/projects/personal/aethermon"), Some(repo), 0.0);
+        assert!(
+            (legacy_hot - legacy_cold).abs() < 1e-12,
+            "legacy has no usage/recency term, so these must tie"
+        );
+
+        let hot = combined_score(
+            0.8,
+            Some("project"),
+            Some("/Users/byron/projects/personal/aethermon"),
+            Some(repo),
+            0.0,
+            80,
+            now,
+            now,
+        );
+        let cold = combined_score(
+            0.8,
+            Some("project"),
+            Some("/Users/byron/projects/personal/aethermon"),
+            Some(repo),
+            0.0,
+            0,
+            stale,
+            now,
+        );
+        assert!(
+            hot > cold,
+            "frequently used + recent memory must outrank a stale unused twin ({hot} vs {cold})"
+        );
+    }
+
+    #[test]
+    fn proof_weak_coaccess_and_contradicts_do_not_boost() {
+        assert!(!graph_edge_usable("relates-to", 0.1));
+        assert!(graph_edge_usable("relates-to", 0.2));
+        assert!(graph_edge_usable("depends-on", 0.5));
+        assert!(graph_edge_usable("supersedes", 0.5));
+        assert!(!graph_edge_usable("contradicts", 0.9));
+    }
+
+    #[test]
+    fn standing_rule_injects_full_content_notes_keep_snippet() {
+        let rule = inject_body(
+            Some("feedback"),
+            "Always run cargo test before pushing.",
+            "Always run…",
+        );
+        assert_eq!(rule, "Always run cargo test before pushing.");
+        let note = inject_body(Some("project"), "long body", "short snippet");
+        assert_eq!(note, "short snippet");
     }
 
     #[test]

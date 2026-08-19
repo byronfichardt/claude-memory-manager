@@ -1,5 +1,6 @@
 pub mod bootstrap;
 pub mod claude_api;
+pub mod dedup;
 pub mod dreamer;
 pub mod embeddings;
 pub mod frontmatter;

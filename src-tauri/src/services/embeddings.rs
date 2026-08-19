@@ -32,6 +32,10 @@ const SWEEP_BATCH: usize = 16;
 static MODEL: OnceLock<Mutex<Option<TextEmbedding>>> = OnceLock::new();
 static IS_DOWNLOADING: AtomicBool = AtomicBool::new(false);
 static IS_SWEEPING: AtomicBool = AtomicBool::new(false);
+/// How many times `queue_memory` has been invoked this process. Used to
+/// prove insert/update now enqueue indexing (Update 2); was zero callers.
+pub static QUEUE_MEMORY_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 static SWEEP_INDEXED: OnceLock<Mutex<u64>> = OnceLock::new();
 static SWEEP_TOTAL: OnceLock<Mutex<u64>> = OnceLock::new();
 
@@ -350,6 +354,7 @@ fn store_embeddings(pairs: &[(&str, &Vec<f32>)]) -> Result<(), String> {
 /// Queue a single memory for indexing after it's created/updated.
 /// Fire-and-forget — errors are swallowed since FTS5 fallback still works.
 pub fn queue_memory(id: &str, text: &str) {
+    QUEUE_MEMORY_CALLS.fetch_add(1, Ordering::SeqCst);
     if !is_model_ready() {
         return;
     }

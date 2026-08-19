@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 use crate::services::claude_api::ClaudeClient;
+use crate::services::dedup;
 use crate::store::{edges, history, memories, settings, topics};
 
 pub const PROGRESS_EVENT: &str = "organizer:progress";
@@ -369,7 +370,13 @@ pub async fn run_full_pass(handle: Option<AppHandle>, force: bool) -> Result<Org
         }
     }
 
-    // Phase 2: dedup only topics with new/updated memories since last pass
+    // Phase 2: store-wide near-dup clusters (cross-topic), then the
+    // per-topic pass for leftover same-topic paraphrases the clusterer
+    // did not group.
+    match dedup_storewide(h, &client, &mut report).await {
+        Ok(()) => {}
+        Err(e) => report.errors.push(format!("dedup storewide: {}", e)),
+    }
     match dedup_changed_topics(h, &client, &mut report, last_ts).await {
         Ok(()) => {}
         Err(e) => report.errors.push(format!("dedup: {}", e)),
@@ -899,6 +906,68 @@ fn apply_classifications(
     Ok(())
 }
 
+/// Cluster the whole store and send only those groups to the LLM.
+/// This is the Update 2 path: paraphrases that landed in different topics
+/// are visible here. Falls back to lexical Jaccard when embeddings are cold.
+async fn dedup_storewide(
+    handle: Option<&AppHandle>,
+    client: &ClaudeClient,
+    report: &mut OrganizerReport,
+) -> Result<(), String> {
+    let all = memories::list_all()?;
+    let live: Vec<_> = all
+        .into_iter()
+        .filter(|m| m.archived_at.is_none())
+        .collect();
+    if live.len() < DEDUP_MIN_TOPIC_SIZE {
+        return Ok(());
+    }
+
+    let clusters = dedup::cluster_storewide(&live);
+    if clusters.is_empty() {
+        return Ok(());
+    }
+
+    let by_id: std::collections::HashMap<String, memories::Memory> =
+        live.into_iter().map(|m| (m.id.clone(), m)).collect();
+
+    let total = clusters.len();
+    for (i, cluster) in clusters.into_iter().enumerate() {
+        let mems: Vec<memories::Memory> = cluster
+            .iter()
+            .filter_map(|c| by_id.get(&c.id).cloned())
+            .collect();
+        if mems.len() < 2 {
+            continue;
+        }
+        emit(
+            handle,
+            "dedup",
+            format!("Deduping store-wide cluster of {}", mems.len()),
+            i,
+            total,
+        );
+        match dedup_batch(client, &mems).await {
+            Ok(merges) => {
+                for merge in merges {
+                    let topic = mems
+                        .first()
+                        .and_then(|m| m.topic.clone())
+                        .unwrap_or_else(|| "untopiced".to_string());
+                    match apply_merge(&merge, &topic) {
+                        Ok(()) => report.merged_count += 1,
+                        Err(e) => report
+                            .errors
+                            .push(format!("apply storewide merge: {}", e)),
+                    }
+                }
+            }
+            Err(e) => report.errors.push(format!("dedup storewide cluster: {}", e)),
+        }
+    }
+    Ok(())
+}
+
 /// Dedup only topics that have memories created/updated since `since_ts`.
 async fn dedup_changed_topics(
     handle: Option<&AppHandle>,
@@ -947,7 +1016,9 @@ async fn dedup_batch(
     batch: &[memories::Memory],
 ) -> Result<Vec<Merge>, String> {
     let mut prompt = String::new();
-    prompt.push_str("These memories are in the same topic. Identify near-duplicates:\n\n");
+    prompt.push_str(
+        "These memories look similar (they may be in different topics). Identify near-duplicates:\n\n",
+    );
 
     for m in batch {
         prompt.push_str(&format!("[id={}]\n", m.id));
@@ -988,16 +1059,25 @@ fn apply_merge(merge: &Merge, topic: &str) -> Result<(), String> {
     });
     history::record("merge", snapshot)?;
 
-    // Preserve project scope if all sources share one; otherwise go global
-    // (cross-project merges lose their project affinity rather than get wrongly-scoped).
-    let shared_project: Option<String> = {
-        let first = source_memories[0].project.clone();
-        if source_memories.iter().all(|m| m.project == first) {
-            first
-        } else {
-            None
-        }
-    };
+    let types: Vec<Option<&str>> = source_memories
+        .iter()
+        .map(|m| m.memory_type.as_deref())
+        .collect();
+    let projects: Vec<Option<&str>> = source_memories
+        .iter()
+        .map(|m| m.project.as_deref())
+        .collect();
+    if !dedup::merge_types_compatible(&types) {
+        return Err("merge refused: incompatible memory types".to_string());
+    }
+    if !dedup::merge_projects_compatible(&projects) {
+        return Err(
+            "merge refused: different projects — opposite repo rules must stay separate"
+                .to_string(),
+        );
+    }
+    let memory_type = dedup::merge_memory_type(&types);
+    let shared_project = dedup::merge_project(&projects);
 
     // Insert the merged memory. Ordering: insert first, then delete sources.
     // If this errors halfway, we can still recover from the history log.
@@ -1005,7 +1085,7 @@ fn apply_merge(merge: &Merge, topic: &str) -> Result<(), String> {
         title: merge.merged_title.clone(),
         description: merge.merged_description.clone(),
         content: merge.merged_content.clone(),
-        memory_type: source_memories[0].memory_type.clone(),
+        memory_type,
         topic: Some(topic.to_string()),
         source: Some("auto_merged".to_string()),
         project: shared_project,

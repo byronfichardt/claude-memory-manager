@@ -11,7 +11,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::services::{project, ranking};
+use crate::services::{dedup, project, ranking};
 use crate::store::{edges, memories, repo_edges};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -402,17 +402,27 @@ fn tool_memory_search(args: Value) -> Result<String, String> {
         }
     }
 
-    // Re-rank by combined (BM25-proxy + affinity). BM25 in FTS5 is negative
-    // with lower=better — normalize to a simple rank-based score.
+    // Re-rank with the same combined score the hook uses. BM25 in FTS5 is
+    // negative (lower=better) — invert via rank so we don't depend on the
+    // raw range of a small result set.
     let n = hits.len() as f64;
+    let now = chrono::Utc::now().timestamp();
     let mut indexed: Vec<(usize, f64)> = hits
         .iter()
         .enumerate()
         .map(|(i, h)| {
-            let bm25_rank_norm = 1.0 - (i as f64 / n.max(1.0)); // top hit = 1.0, bottom ~ 0
-            let aff = project::project_affinity(h.project.as_deref(), current_project_ref);
-            let type_boost = ranking::type_weight(h.memory_type.as_deref());
-            (i, bm25_rank_norm + aff + type_boost)
+            let bm25_rank_norm = 1.0 - (i as f64 / n.max(1.0));
+            let score = ranking::combined_score(
+                bm25_rank_norm,
+                h.memory_type.as_deref(),
+                h.project.as_deref(),
+                current_project_ref,
+                0.0,
+                h.access_count,
+                h.updated_at,
+                now,
+            );
+            (i, score)
         })
         .collect();
     indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -434,12 +444,24 @@ fn tool_memory_search(args: Value) -> Result<String, String> {
             .map(|i| hits[indexed[i].0].clone())
             .collect();
     hits = reranked;
+    hits.sort_by(|a, b| {
+        ranking::is_standing_rule(b.memory_type.as_deref())
+            .cmp(&ranking::is_standing_rule(a.memory_type.as_deref()))
+    });
+
+    let shown: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+    let _ = memories::bump_access(&shown);
 
     let mut out = format!("Found {} memories for \"{}\":\n\n", hits.len(), query);
     out.push_str(ranking::PRECEDENCE_NOTE);
     out.push_str("\n\n");
     for (i, hit) in hits.iter().enumerate() {
         let tag = ranking::context_tag(hit.memory_type.as_deref(), hit.project.as_deref());
+        let body = ranking::inject_body(
+            hit.memory_type.as_deref(),
+            &hit.content,
+            &hit.snippet,
+        );
         out.push_str(&format!(
             "{}. [{}] ({}) {}\n   id: {}\n   {}\n   {}\n\n",
             i + 1,
@@ -448,7 +470,7 @@ fn tool_memory_search(args: Value) -> Result<String, String> {
             hit.title,
             hit.id,
             hit.description,
-            hit.snippet,
+            body,
         ));
     }
     Ok(out)
@@ -512,6 +534,13 @@ fn tool_memory_add(args: Value) -> Result<String, String> {
         explicit_project,
         detected.as_deref(),
     );
+
+    if let Some(existing) = dedup::existing_near_duplicate(&title, &content, project.as_deref())? {
+        return Ok(format!(
+            "A very similar memory already exists — not saved again (near-duplicate, not deleted).\nid: {}\ntitle: {}\nDo not call memory_add again for this fact.",
+            existing.id, existing.title
+        ));
+    }
 
     let memory = memories::insert(memories::NewMemory {
         title,
