@@ -1,11 +1,11 @@
 {
-  "version": "0.4.7",
-  "notes": "Tighter recall (FTS sanitizer, standing-rule ranking) and store-wide near-dup clustering. Opposite repo rules are not merged.",
-  "pub_date": "2026-08-19T13:16:05Z",
+  "version": "0.4.8",
+  "notes": "Corrections now retire what they correct, and each repo gets a single project identity.",
+  "pub_date": "2026-08-26T16:41:48Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRGhLanZmVUFTNlNHY3lBWjJyNmJlQ3RTaUJXVzZ2NEw0SU8xRnpIUkhtUFh6aXJOSzVFOE94ZVBMT2hKbStxcFZEMFhMS1RFRll2OFN1WmtTTEUwY1FFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3MTQyNDUwCWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKVExIYTQ1OVk4OXVsYTJ1KzMwM1lhdWY3Tmo2UFBQWWN2UmtybkhpdjBhc3RQamZaT0lGODhhRjBOajJuT29aN0IzMVBwazI3SU1iOVROUzcwdXI1QlE9PQo=",
-      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.7/Claude.Memory.Manager.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRG5DQXI0eFE4RFZ3TWI5OUlKVUdyRDdpZXVoQ0F1Uk1IMkY3RmJOZ2lCeWRmZ3BGaHl1dzlvOGgvYy95OTREa3puc3hwNW9PbXV0VDdTYit5eklOdEFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3NzYyNDkzCWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKbmxLYi9admhtRnUza2kyVjBXQjh2d3pob3I2cWdVTWxUcC8zalltL3BuWXNaN3lOTHJPZ3JtMmV5blRPdzlvdHhqQTdVR2swQzdMam5MNkxQWEI4Q3c9PQo=",
+      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.8/Claude.Memory.Manager.app.tar.gz"
     }
   }
 }
