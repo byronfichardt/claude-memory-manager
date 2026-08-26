@@ -200,7 +200,7 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "memory_add",
-                "description": "Save a new memory to the store. You MUST call this proactively — don't wait for the user to ask. Save user corrections, project conventions, debugging findings, stated preferences, architecture decisions, workflow discoveries, and project state changes. A typical session should produce 3-10 memories. Be specific and include enough context that the memory is useful in future sessions.\n\nPROJECT SCOPING: If the memory is a user preference or cross-project rule (type=user/feedback/reference), leave `project` unset — it will be saved as global. If it's a specific fact about the current codebase (type=project), set `project` to the absolute git-root path of that project. Type=user is ALWAYS saved as global regardless.",
+                "description": "Save a new memory to the store. You MUST call this proactively — don't wait for the user to ask. Save user corrections, project conventions, debugging findings, stated preferences, architecture decisions, workflow discoveries, and project state changes. A typical session should produce 3-10 memories. Be specific and include enough context that the memory is useful in future sessions.\n\nPROJECT SCOPING: If the memory is a user preference or cross-project rule (type=user/feedback/reference), leave `project` unset — it will be saved as global. If it's a specific fact about the current codebase (type=project), set `project` to the absolute git-root path of that project. Type=user is ALWAYS saved as global regardless.\n\nCORRECTING AN EXISTING MEMORY: if this memory corrects, replaces or updates one you just read, you MUST pass its id in `supersedes`. Writing a bare 'CORRECTION: ...' memory does NOT retire the old one — dedup will not catch it, because a correction is worded differently from what it corrects, and BOTH will keep being recalled as equally valid. Search first, then supersede.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -228,6 +228,11 @@ fn handle_tools_list() -> Value {
                         "project": {
                             "type": "string",
                             "description": "Optional scope override. \"global\" forces a global memory. An absolute git-root path scopes it to that project (e.g. /Users/byron/projects/personal/hearth). If omitted: type=user is always global; type=feedback/reference default global; type=project defaults to the project detected by the UserPromptSubmit hook (transcript-inferred), falling back to the server's startup cwd."
+                        },
+                        "supersedes": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Memory ids (UUIDs, from memory_search or memory_get) that this new memory replaces. Each is archived — kept in the store and reversible, but excluded from future recall — and linked with a `supersedes` edge. Use whenever you are correcting, refining or retracting a fact you previously saved. Pass a single id as a one-element array."
                         }
                     },
                     "required": ["title", "content"]
@@ -524,6 +529,18 @@ fn tool_memory_add(args: Value) -> Result<String, String> {
     let explicit_project = args
         .get("project")
         .and_then(Value::as_str);
+    // Accept either an array of ids or a bare string — models reach for both.
+    let supersedes: Vec<String> = match args.get("supersedes") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Some(Value::String(s)) if !s.trim().is_empty() => vec![s.trim().to_string()],
+        _ => Vec::new(),
+    };
 
     // Resolve scope: user type is forced global; explicit override wins;
     // otherwise type-driven default with the hook-detected project (or server
@@ -536,10 +553,14 @@ fn tool_memory_add(args: Value) -> Result<String, String> {
     );
 
     if let Some(existing) = dedup::existing_near_duplicate(&title, &content, project.as_deref())? {
-        return Ok(format!(
-            "A very similar memory already exists — not saved again (near-duplicate, not deleted).\nid: {}\ntitle: {}\nDo not call memory_add again for this fact.",
-            existing.id, existing.title
-        ));
+        // A memory that supersedes its near-twin is the intended case for a
+        // correction — refusing it would leave the stale version standing.
+        if !supersedes.iter().any(|id| id == &existing.id) {
+            return Ok(format!(
+                "A very similar memory already exists — not saved again (near-duplicate, not deleted).\nid: {}\ntitle: {}\nIf your memory CORRECTS this one, call memory_add again with supersedes: [\"{}\"]. Otherwise do not call memory_add again for this fact.",
+                existing.id, existing.title, existing.id
+            ));
+        }
     }
 
     let memory = memories::insert(memories::NewMemory {
@@ -557,10 +578,63 @@ fn tool_memory_add(args: Value) -> Result<String, String> {
         Some(p) => format!("project: {}", p),
     };
 
+    let supersede_report = apply_supersedes(&memory.id, &supersedes);
+
     Ok(format!(
-        "Memory saved ({}).\nid: {}\ntitle: {}",
-        scope_label, memory.id, memory.title
+        "Memory saved ({}).\nid: {}\ntitle: {}{}",
+        scope_label, memory.id, memory.title, supersede_report
     ))
+}
+
+/// Link `new_id` to each superseded memory and archive the old ones.
+///
+/// Archiving keeps the row (reversible via unarchive) but drops it from recall,
+/// so the corrected fact stops competing with its correction. Reported back to
+/// the caller so a bad id surfaces immediately instead of silently no-op'ing.
+fn apply_supersedes(new_id: &str, supersedes: &[String]) -> String {
+    if supersedes.is_empty() {
+        return String::new();
+    }
+    let mut archived = Vec::new();
+    let mut problems = Vec::new();
+
+    for old_id in supersedes {
+        if old_id == new_id {
+            problems.push(format!("{} (a memory cannot supersede itself)", old_id));
+            continue;
+        }
+        match memories::get(old_id) {
+            Ok(Some(old)) => {
+                if let Err(e) = edges::insert(new_id, old_id, "supersedes", 0.95, "explicit") {
+                    problems.push(format!("{} (edge failed: {})", old_id, e));
+                    continue;
+                }
+                match memories::archive(old_id) {
+                    Ok(true) => archived.push(old.title),
+                    Ok(false) => archived.push(format!("{} (was already archived)", old.title)),
+                    Err(e) => problems.push(format!("{} (archive failed: {})", old_id, e)),
+                }
+            }
+            Ok(None) => problems.push(format!("{} (no such memory)", old_id)),
+            Err(e) => problems.push(format!("{} (lookup failed: {})", old_id, e)),
+        }
+    }
+
+    let mut out = String::new();
+    if !archived.is_empty() {
+        out.push_str(&format!(
+            "\nSuperseded and archived ({}):\n  - {}",
+            archived.len(),
+            archived.join("\n  - ")
+        ));
+    }
+    if !problems.is_empty() {
+        out.push_str(&format!(
+            "\nNOT superseded — check these ids:\n  - {}",
+            problems.join("\n  - ")
+        ));
+    }
+    out
 }
 
 fn tool_memory_get(args: Value) -> Result<String, String> {
