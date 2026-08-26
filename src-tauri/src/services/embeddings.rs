@@ -371,6 +371,25 @@ pub fn queue_memory(id: &str, text: &str) {
 
 /// KNN search in the vec_memories table. Returns (memory_id, distance) pairs.
 /// Returns None if the model isn't ready (caller should fall back to FTS5).
+///
+/// UNREACHABLE BY DESIGN — and currently has no callers at all.
+///
+/// Recall happens in the hook and MCP processes, which are short-lived and
+/// cannot afford to load a ~520 MB model per prompt (see the module header).
+/// Only the long-lived GUI process holds a warm model, and it does not serve
+/// recall. So `hybrid_search` is FTS5 + graph + project affinity, and this
+/// function is never called.
+///
+/// Reaching it would need the GUI to expose query embedding over local IPC,
+/// with a hard timeout and an FTS5 fallback. That was assessed on 2026-08-26
+/// and NOT built, because the retrieval failures we could actually observe were
+/// not lexical misses — FTS5 returned the right candidates every time. The
+/// failures were write-side: corrections were saved without retiring what they
+/// corrected. `memory_add`'s `supersedes` parameter addresses that instead.
+///
+/// Do not wire this in without first showing a recall miss that semantic search
+/// would have caught.
+#[allow(dead_code)]
 pub fn vector_search(query: &str, limit: usize) -> Option<Vec<(String, f64)>> {
     let embedding = embed_single(query)?;
     let bytes = f32_slice_to_bytes(&embedding);

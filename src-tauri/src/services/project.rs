@@ -38,10 +38,85 @@ pub fn find_git_root(start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Path segment Claude Code uses for its per-ticket worktrees.
+const CLAUDE_WORKTREE_SEGMENT: &str = ".claude/worktrees/";
+
+/// Settings key holding a JSON object of `{ "<path prefix>": "<canonical path>" }`.
+/// Used for checkouts that are genuine clones rather than worktrees (e.g. the
+/// bugsnag-triage working copies under ~/.local/var), which `find_git_root`
+/// legitimately resolves to themselves.
+const SETTING_PROJECT_ALIASES: &str = "project_aliases";
+
+/// Collapse a git worktree path to the repository's main worktree.
+///
+/// A linked worktree has a `.git` **file** containing `gitdir: <path>`, pointing
+/// at `<main-repo>/.git/worktrees/<name>`. Walking back up from that to the
+/// `.git` directory's parent yields the main worktree root.
+///
+/// Returns None when `path` is not a linked worktree.
+fn main_worktree_of(path: &Path) -> Option<PathBuf> {
+    let git = path.join(".git");
+    if !git.is_file() {
+        return None;
+    }
+    let contents = std::fs::read_to_string(&git).ok()?;
+    let gitdir = contents.strip_prefix("gitdir:")?.trim();
+    let gitdir = Path::new(gitdir);
+
+    // <main>/.git/worktrees/<name> -> <main>/.git -> <main>
+    let worktrees_dir = gitdir.parent()?;
+    if worktrees_dir.file_name()? != "worktrees" {
+        return None;
+    }
+    let dot_git = worktrees_dir.parent()?;
+    if dot_git.file_name()? != ".git" {
+        return None;
+    }
+    Some(dot_git.parent()?.to_path_buf())
+}
+
+/// Textual fallback for worktree paths whose checkout no longer exists on disk
+/// (the directory is gone but the recorded project string persists in the store).
+fn strip_claude_worktree_suffix(path: &Path) -> Option<PathBuf> {
+    let s = path.to_string_lossy();
+    let idx = s.find(CLAUDE_WORKTREE_SEGMENT)?;
+    Some(PathBuf::from(s[..idx].trim_end_matches('/').to_string()))
+}
+
+/// Read the user-configured alias table. Any problem yields an empty table —
+/// a broken alias setting must never stop a memory being scoped.
+fn load_aliases() -> HashMap<String, String> {
+    match crate::store::settings::get(SETTING_PROJECT_ALIASES, "") {
+        Ok(raw) if !raw.trim().is_empty() => serde_json::from_str(&raw).unwrap_or_default(),
+        _ => HashMap::new(),
+    }
+}
+
+/// Pure half of [`canonical_project`], with the alias table supplied.
+pub fn canonical_project_with_aliases(path: &Path, aliases: &HashMap<String, String>) -> PathBuf {
+    let collapsed = main_worktree_of(path)
+        .or_else(|| strip_claude_worktree_suffix(path))
+        .unwrap_or_else(|| path.to_path_buf());
+    match aliases.get(collapsed.to_string_lossy().as_ref()) {
+        Some(target) => PathBuf::from(target),
+        None => collapsed,
+    }
+}
+
+/// Reduce any checkout path to a single stable identity for the repository.
+///
+/// Without this, one repo fragments into several project keys — a worktree, a
+/// clone under another root, the main checkout — and project affinity scores
+/// each of them as a *different* project (-0.20) instead of the same one (+0.40).
+pub fn canonical_project(path: &Path) -> PathBuf {
+    canonical_project_with_aliases(path, &load_aliases())
+}
+
 /// Resolve a directory to its project identifier.
-/// Returns the git root if inside a git repo, else None (we treat ambiguity as "no project").
+/// Returns the canonical git root if inside a git repo, else None (we treat
+/// ambiguity as "no project").
 pub fn resolve_project(cwd: &Path) -> Option<PathBuf> {
-    find_git_root(cwd)
+    find_git_root(cwd).map(|root| canonical_project(&root))
 }
 
 /// True if two paths share their immediate parent directory.
@@ -96,6 +171,22 @@ pub fn resolve_memory_scope(
     explicit: Option<&str>,
     detected_project: Option<&Path>,
 ) -> Option<String> {
+    resolve_memory_scope_with_aliases(memory_type, explicit, detected_project, &load_aliases())
+}
+
+/// Pure half of [`resolve_memory_scope`], with the alias table supplied.
+pub fn resolve_memory_scope_with_aliases(
+    memory_type: Option<&str>,
+    explicit: Option<&str>,
+    detected_project: Option<&Path>,
+    aliases: &HashMap<String, String>,
+) -> Option<String> {
+    let canonical = |p: &Path| {
+        canonical_project_with_aliases(p, aliases)
+            .to_string_lossy()
+            .to_string()
+    };
+
     // Hard rule: user type is always global
     if memory_type == Some("user") {
         return None;
@@ -107,13 +198,15 @@ pub fn resolve_memory_scope(
         if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("global") {
             return None;
         }
-        return Some(trimmed.to_string());
+        // Canonicalise too: a caller passing its own cwd inside a worktree would
+        // otherwise mint a fresh project identity for the same repo.
+        return Some(canonical(Path::new(trimmed)));
     }
 
     // Type-driven defaults
     match memory_type {
         Some("feedback") | Some("reference") => None,
-        _ => detected_project.map(|p| p.to_string_lossy().to_string()),
+        _ => detected_project.map(|p| canonical(p)),
     }
 }
 
@@ -621,5 +714,131 @@ mod tests {
             }
         })
         .to_string()
+    }
+
+    // ── Project canonicalisation ─────────────────────────────────────────────
+
+    fn no_aliases() -> HashMap<String, String> {
+        HashMap::new()
+    }
+
+    /// A real linked worktree: `.git` is a FILE pointing into the main repo.
+    #[test]
+    fn canonical_project_collapses_a_real_linked_worktree() {
+        let base = tmpdir();
+        let main_repo = base.join("loyalty-service");
+        let worktree = main_repo.join(".claude/worktrees/TAF-3045");
+        fs::create_dir_all(main_repo.join(".git/worktrees/TAF-3045")).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!(
+                "gitdir: {}\n",
+                main_repo.join(".git/worktrees/TAF-3045").display()
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            canonical_project_with_aliases(&worktree, &no_aliases()),
+            main_repo
+        );
+    }
+
+    /// The checkout is gone but the recorded project string survives in the store.
+    #[test]
+    fn canonical_project_strips_worktree_suffix_when_checkout_is_missing() {
+        let p = Path::new("/Users/byron/projects/work/loyalty-service/.claude/worktrees/TAF-3255");
+        assert_eq!(
+            canonical_project_with_aliases(p, &no_aliases()),
+            PathBuf::from("/Users/byron/projects/work/loyalty-service")
+        );
+    }
+
+    #[test]
+    fn canonical_project_strips_nested_paths_below_a_worktree() {
+        let p = Path::new(
+            "/Users/byron/projects/work/loyalty-service/.claude/worktrees/TAF-3045/.cognito-tmp",
+        );
+        assert_eq!(
+            canonical_project_with_aliases(p, &no_aliases()),
+            PathBuf::from("/Users/byron/projects/work/loyalty-service")
+        );
+    }
+
+    #[test]
+    fn canonical_project_leaves_an_ordinary_repo_untouched() {
+        let p = Path::new("/Users/byron/projects/work/loyalty-service");
+        assert_eq!(canonical_project_with_aliases(p, &no_aliases()), p);
+    }
+
+    /// Separate clones are legitimately their own git root, so only the alias
+    /// table can fold them onto the canonical checkout.
+    #[test]
+    fn canonical_project_applies_the_alias_table() {
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            "/Users/byron/.local/var/bugsnag-triage/repo".to_string(),
+            "/Users/byron/projects/work/shopify-sanity-connector".to_string(),
+        );
+        assert_eq!(
+            canonical_project_with_aliases(
+                Path::new("/Users/byron/.local/var/bugsnag-triage/repo"),
+                &aliases
+            ),
+            PathBuf::from("/Users/byron/projects/work/shopify-sanity-connector")
+        );
+    }
+
+    /// Worktree collapse runs BEFORE the alias lookup, so an alias keyed on the
+    /// main repo still fires for a memory written inside one of its worktrees.
+    #[test]
+    fn canonical_project_collapses_then_aliases() {
+        let mut aliases = HashMap::new();
+        aliases.insert("/repos/old-name".to_string(), "/repos/new-name".to_string());
+        assert_eq!(
+            canonical_project_with_aliases(
+                Path::new("/repos/old-name/.claude/worktrees/TICKET-1"),
+                &aliases
+            ),
+            PathBuf::from("/repos/new-name")
+        );
+    }
+
+    #[test]
+    fn resolve_memory_scope_canonicalises_an_explicit_worktree_path() {
+        let scope = resolve_memory_scope_with_aliases(
+            Some("project"),
+            Some("/Users/byron/projects/work/loyalty-service/.claude/worktrees/TAF-3045"),
+            None,
+            &no_aliases(),
+        );
+        assert_eq!(
+            scope.as_deref(),
+            Some("/Users/byron/projects/work/loyalty-service")
+        );
+    }
+
+    #[test]
+    fn resolve_memory_scope_canonicalises_the_detected_project_too() {
+        let detected =
+            Path::new("/Users/byron/projects/work/shopify-theme/.claude/worktrees/TAF-3079");
+        let scope =
+            resolve_memory_scope_with_aliases(Some("project"), None, Some(detected), &no_aliases());
+        assert_eq!(
+            scope.as_deref(),
+            Some("/Users/byron/projects/work/shopify-theme")
+        );
+    }
+
+    #[test]
+    fn resolve_memory_scope_still_forces_user_type_global() {
+        let scope = resolve_memory_scope_with_aliases(
+            Some("user"),
+            Some("/Users/byron/projects/work/loyalty-service/.claude/worktrees/TAF-3045"),
+            None,
+            &no_aliases(),
+        );
+        assert_eq!(scope, None);
     }
 }
