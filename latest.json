@@ -1,11 +1,11 @@
 {
-  "version": "0.4.8",
-  "notes": "Corrections now retire what they correct, and each repo gets a single project identity.",
-  "pub_date": "2026-08-26T16:41:48Z",
+  "version": "0.4.9",
+  "notes": "The organizer and dreamer now let you choose which Claude profile they sign in as (Settings → Claude Code integration → Organizer account) instead of always using ~/.claude-personal.",
+  "pub_date": "2026-09-15T11:41:37Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRG5DQXI0eFE4RFZ3TWI5OUlKVUdyRDdpZXVoQ0F1Uk1IMkY3RmJOZ2lCeWRmZ3BGaHl1dzlvOGgvYy95OTREa3puc3hwNW9PbXV0VDdTYit5eklOdEFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3NzYyNDkzCWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKbmxLYi9admhtRnUza2kyVjBXQjh2d3pob3I2cWdVTWxUcC8zalltL3BuWXNaN3lOTHJPZ3JtMmV5blRPdzlvdHhqQTdVR2swQzdMam5MNkxQWEI4Q3c9PQo=",
-      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.8/Claude.Memory.Manager.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRHNDUVBrNUJRR05McTk4S0pBRFFFQndoUVRwQ3huRXd4TlNyeEd6NVFWVld5OW5aTlNydkUxZ0VFUkM0eG45S3ZmTzA5N3RRRmpCR0cwMnpzcUx1NHcwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NDcyNDg4CWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKQVdIcjlQYzJra21KOXdzbFkwaEo0dktmUlUwdW9xQi9RTU15QnlpTTF3amlBVlIvNy9nZHpEK3hhdGtYUmRPYmlaZHFORlp3bUJNQnhEMmtiVDlPQkE9PQo=",
+      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.9/Claude.Memory.Manager.app.tar.gz"
     }
   }
 }
