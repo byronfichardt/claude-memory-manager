@@ -67,6 +67,11 @@ export interface BootstrapStatus {
   managed_section_present: boolean;
 }
 
+export interface OrganizerConfigDir {
+  configured: string;
+  effective: string;
+}
+
 export const ERR_NO_CLAUDE_INSTALL = "NO_CLAUDE_INSTALL";
 export const ERR_NO_CLAUDE_CLI = "NO_CLAUDE_CLI";
 

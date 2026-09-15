@@ -267,6 +267,26 @@ async function saveSplitThreshold() {
   }
 }
 
+const organizerDirSaving = ref(false);
+const organizerDirError = ref<string | null>(null);
+
+async function onOrganizerDirChange(event: Event) {
+  const path = (event.target as HTMLSelectElement).value;
+  organizerDirError.value = null;
+  organizerDirSaving.value = true;
+  try {
+    await app.setOrganizerConfigDirPath(path);
+  } catch (e) {
+    organizerDirError.value = String(e);
+  } finally {
+    organizerDirSaving.value = false;
+  }
+}
+
+function configDirLabel(path: string): string {
+  return app.bootstrap?.config_dirs?.find((d) => d.path === path)?.label ?? path;
+}
+
 async function toggleHook() {
   if (app.hookStatus?.enabled) {
     await app.disableHook();
@@ -563,6 +583,41 @@ function goHome() {
               {{ config.installed ? "installed" : "missing" }}
             </span>
           </div>
+        </div>
+      </div>
+
+      <!-- Organizer account -->
+      <div class="card">
+        <div class="row">
+          <div class="row-main">
+            <div class="label">Organizer account</div>
+            <p class="sub">
+              Profile the organizer and dreamer sign in as when they run
+              <code class="inline-code">claude -p</code>. Every AI pass bills
+              this account, whichever profile saved the memory.
+            </p>
+            <div v-if="organizerDirError" class="error inline-error">
+              {{ organizerDirError }}
+            </div>
+          </div>
+          <select
+            class="dir-select"
+            :value="app.organizerConfigDir?.configured ?? ''"
+            :disabled="organizerDirSaving"
+            aria-label="Organizer account"
+            @change="onOrganizerDirChange"
+          >
+            <option value="">
+              Auto{{ app.organizerConfigDir?.effective ? ` (${configDirLabel(app.organizerConfigDir.effective)})` : "" }}
+            </option>
+            <option
+              v-for="config in app.bootstrap?.config_dirs ?? []"
+              :key="config.path"
+              :value="config.path"
+            >
+              {{ config.label }}
+            </option>
+          </select>
         </div>
       </div>
 
@@ -1313,6 +1368,21 @@ function goHome() {
   border-color: var(--color-accent);
 }
 .threshold-input:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.dir-select {
+  padding: 0.375rem 0.5rem;
+  font-size: 0.75rem;
+  font-family: inherit;
+  background: var(--color-bg);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: 0.3125rem;
+}
+.dir-select:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+.dir-select:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .ghost-btn {
   padding: 0.375rem 0.875rem;

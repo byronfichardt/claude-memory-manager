@@ -5,7 +5,7 @@ use crate::services::installer::{
     self, ConfigDirRegistration, SetupResult, UninstallReport, MCP_SERVER_NAME,
     SETTING_CUSTOM_DB_DIR, SETTING_HOOK_ENABLED,
 };
-use crate::services::{bootstrap, dreamer, embeddings, organizer, portable};
+use crate::services::{bootstrap, claude_api, dreamer, embeddings, organizer, portable};
 use crate::store::{dreams, edges, history, memories, repo_edges, settings, topics};
 
 /// Run a blocking closure on tauri's blocking thread pool. Use for any
@@ -290,6 +290,43 @@ pub async fn set_split_threshold(threshold: u32) -> Result<(), String> {
             ));
         }
         settings::set(organizer::SETTING_SPLIT_THRESHOLD, &threshold.to_string())
+    })
+    .await
+}
+
+#[derive(Debug, Serialize)]
+pub struct OrganizerConfigDir {
+    /// Path saved in settings; empty when the user has not chosen one.
+    pub configured: String,
+    /// Path the next organizer run will actually authenticate as.
+    pub effective: String,
+}
+
+#[tauri::command]
+pub async fn get_organizer_config_dir() -> Result<OrganizerConfigDir, String> {
+    blocking(|| {
+        let configured = settings::get(claude_api::SETTING_ORGANIZER_CONFIG_DIR, "")?;
+        let effective = claude_api::resolve_config_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        Ok(OrganizerConfigDir { configured, effective })
+    })
+    .await
+}
+
+/// Pass an empty path to return to automatic resolution.
+#[tauri::command]
+pub async fn set_organizer_config_dir(path: String) -> Result<(), String> {
+    blocking(move || {
+        if !path.is_empty() {
+            let known = bootstrap::list_claude_config_dirs()
+                .iter()
+                .any(|(_, dir)| dir.to_string_lossy() == path);
+            if !known {
+                return Err(format!("{} is not a detected Claude config directory", path));
+            }
+        }
+        settings::set(claude_api::SETTING_ORGANIZER_CONFIG_DIR, &path)
     })
     .await
 }
