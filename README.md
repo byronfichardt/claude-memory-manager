@@ -96,6 +96,8 @@ Type `remember: <anything>` (or `/remember ...`, `!remember ...`) in any Claude 
 
 Detects all `~/.claude*` directories automatically (`.claude`, `.claude-personal`, `.claude-work`, etc.), installs the hook + MCP server + bootstrap prompt in each one. Works out of the box for people running multiple Claude Code profiles via `CLAUDE_CONFIG_DIR`.
 
+The organizer and dreamer shell out to `claude -p`, which bills a single account. Pick which profile they sign in as under Settings → Claude Code integration → Organizer account. Left on Auto, the app uses the `CLAUDE_CONFIG_DIR` it was launched with, then `~/.claude`, then the first profile it detected.
+
 ### Menu bar app
 
 The app runs as a macOS menu bar icon (next to Wi-Fi, clock, etc.) — it doesn't appear in the Dock. Click the tray icon to open a context menu:

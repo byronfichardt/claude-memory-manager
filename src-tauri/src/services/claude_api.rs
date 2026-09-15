@@ -5,14 +5,49 @@
 
 #![allow(dead_code)]
 
+use std::path::PathBuf;
 use tokio::process::Command;
+
+use crate::services::bootstrap::list_claude_config_dirs;
+use crate::store::settings;
 
 fn resolve_claude_binary() -> String {
     crate::services::bootstrap::claude_binary_path()
 }
 
+/// Absolute path of the `~/.claude*` dir the organizer authenticates as.
+/// Empty or unset means "resolve automatically".
+pub const SETTING_ORGANIZER_CONFIG_DIR: &str = "organizer_config_dir";
+
 /// Config directory the spawned CLI authenticates against.
-const CLAUDE_CONFIG_DIR_NAME: &str = ".claude-personal";
+///
+/// The store ingests memories from every detected profile, but each `claude -p`
+/// call bills exactly one account. Precedence: the user's explicit choice in
+/// Settings, then the `CLAUDE_CONFIG_DIR` this process was launched with, then
+/// the stock `~/.claude`, then whichever profile was detected first.
+pub fn resolve_config_dir() -> Option<PathBuf> {
+    let configured = settings::get(SETTING_ORGANIZER_CONFIG_DIR, "").unwrap_or_default();
+    if !configured.is_empty() {
+        let path = PathBuf::from(&configured);
+        if path.is_dir() {
+            return Some(path);
+        }
+    }
+
+    if let Ok(env_dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+        let path = PathBuf::from(&env_dir);
+        if !env_dir.is_empty() && path.is_dir() {
+            return Some(path);
+        }
+    }
+
+    let detected = list_claude_config_dirs();
+    detected
+        .iter()
+        .find(|(label, _)| label == "default")
+        .or_else(|| detected.first())
+        .map(|(_, path)| path.clone())
+}
 
 /// Give the spawned `claude` CLI the environment it needs to authenticate.
 ///
@@ -31,12 +66,14 @@ const CLAUDE_CONFIG_DIR_NAME: &str = ".claude-personal";
 /// This previously worked only by accident: the app happened to be launched from
 /// a terminal, so it inherited these from the shell. Relaunching it from Finder
 /// broke classification with no visible error.
-fn apply_cli_env(cmd: &mut Command) {
+fn apply_cli_env(cmd: &mut Command, config_dir: Option<&PathBuf>) {
     let home = dirs::home_dir();
 
     if let Some(ref h) = home {
         cmd.env("HOME", h);
-        cmd.env("CLAUDE_CONFIG_DIR", h.join(CLAUDE_CONFIG_DIR_NAME));
+    }
+    if let Some(dir) = config_dir {
+        cmd.env("CLAUDE_CONFIG_DIR", dir);
     }
 
     // Keychain lookup fails outright without a username. Fall back to the home
@@ -79,6 +116,7 @@ fn apply_cli_env(cmd: &mut Command) {
 pub struct ClaudeClient {
     binary: String,
     model: Option<String>,
+    config_dir: Option<PathBuf>,
 }
 
 pub struct AnalyzeResponse {
@@ -96,6 +134,7 @@ impl ClaudeClient {
         Self {
             binary: resolve_claude_binary(),
             model,
+            config_dir: resolve_config_dir(),
         }
     }
 
@@ -136,7 +175,7 @@ impl ClaudeClient {
             cmd.arg("--model").arg(model);
         }
 
-        apply_cli_env(&mut cmd);
+        apply_cli_env(&mut cmd, self.config_dir.as_ref());
         // The CLI waits ~3s for stdin before giving up; close it so each call
         // doesn't pay that penalty.
         cmd.stdin(std::process::Stdio::null());
@@ -172,7 +211,7 @@ impl ClaudeClient {
     pub async fn check_available(&self) -> Result<(), String> {
         let mut cmd = Command::new(&self.binary);
         cmd.arg("--version");
-        apply_cli_env(&mut cmd);
+        apply_cli_env(&mut cmd, self.config_dir.as_ref());
         cmd.stdin(std::process::Stdio::null());
 
         let output = cmd

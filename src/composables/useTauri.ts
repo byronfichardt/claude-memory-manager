@@ -22,6 +22,7 @@ import type {
   EmbeddingStatus,
   DreamProposal,
   DreamReport,
+  OrganizerConfigDir,
 } from "@/types";
 
 export function useTauri() {
@@ -97,6 +98,10 @@ export function useTauri() {
     getSplitThreshold: () => invoke<number>("get_split_threshold"),
     setSplitThreshold: (threshold: number) =>
       invoke<void>("set_split_threshold", { threshold }),
+    getOrganizerConfigDir: () =>
+      invoke<OrganizerConfigDir>("get_organizer_config_dir"),
+    setOrganizerConfigDir: (path: string) =>
+      invoke<void>("set_organizer_config_dir", { path }),
 
     // Uninstall
     uninstallEverything: () => invoke<UninstallReport>("uninstall_everything"),

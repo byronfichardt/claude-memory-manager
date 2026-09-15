@@ -80,6 +80,8 @@ pub fn run() {
             commands::autopilot::set_auto_organize,
             commands::autopilot::get_split_threshold,
             commands::autopilot::set_split_threshold,
+            commands::autopilot::get_organizer_config_dir,
+            commands::autopilot::set_organizer_config_dir,
             commands::autopilot::get_custom_db_dir,
             commands::autopilot::set_custom_db_dir,
             commands::autopilot::get_hook_status,

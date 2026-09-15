@@ -14,6 +14,7 @@ import type {
   DreamReport,
   DreamProgress,
   DreamProposal,
+  OrganizerConfigDir,
 } from "@/types";
 import { useTauri } from "@/composables/useTauri";
 
@@ -40,6 +41,7 @@ export const useAppStore = defineStore("app", () => {
   const organizeProgress = ref<OrganizerProgress | null>(null);
   const autoOrganize = ref(false);
   const splitThreshold = ref(15);
+  const organizerConfigDir = ref<OrganizerConfigDir | null>(null);
   const lastOrganizeReport = ref<OrganizerReport | null>(null);
   const error = ref<string | null>(null);
 
@@ -258,6 +260,24 @@ export const useAppStore = defineStore("app", () => {
     }
   }
 
+  async function loadOrganizerConfigDir() {
+    try {
+      organizerConfigDir.value = await tauri.getOrganizerConfigDir();
+    } catch (e) {
+      console.error("load organizer config dir:", e);
+    }
+  }
+
+  async function setOrganizerConfigDirPath(path: string) {
+    try {
+      await tauri.setOrganizerConfigDir(path);
+      await loadOrganizerConfigDir();
+    } catch (e) {
+      error.value = String(e);
+      throw e;
+    }
+  }
+
   async function checkForChanges() {
     try {
       const count = await tauri.memoryCount();
@@ -349,6 +369,7 @@ export const useAppStore = defineStore("app", () => {
     await loadStatus();
     await loadAutoOrganize();
     await loadSplitThreshold();
+    await loadOrganizerConfigDir();
     await startProgressListener();
     await startDreamListener();
     await loadDreamProposals();
@@ -372,6 +393,7 @@ export const useAppStore = defineStore("app", () => {
     lastOrganizeReport,
     autoOrganize,
     splitThreshold,
+    organizerConfigDir,
     loading,
     searching,
     settingUp,
@@ -397,6 +419,8 @@ export const useAppStore = defineStore("app", () => {
     setAutoOrganizeEnabled,
     loadSplitThreshold,
     setSplitThresholdValue,
+    loadOrganizerConfigDir,
+    setOrganizerConfigDirPath,
     enableHook,
     disableHook,
     initialize,
