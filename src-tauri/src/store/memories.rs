@@ -465,6 +465,41 @@ pub fn get_by_ids_with_conn(conn: &Connection, ids: &[&str]) -> Result<Vec<Memor
     Ok(out)
 }
 
+/// Active memories in exactly `project`'s scope (None = global) that share
+/// terms with `text`, best BM25 match first. The candidate pool for the
+/// write-time near-duplicate check, so `memory_add` doesn't load every memory.
+pub fn near_duplicate_candidates_with_conn(
+    conn: &Connection,
+    text: &str,
+    project: Option<&str>,
+    limit: u32,
+) -> Result<Vec<Memory>, String> {
+    let sanitized = sanitize_fts_query(text);
+    if sanitized.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = conn
+        .prepare(
+            r#"SELECT m.* FROM memories_fts
+               JOIN memories m ON m.rowid = memories_fts.rowid
+               WHERE memories_fts MATCH ?1 AND m.archived_at IS NULL AND m.project IS ?2
+               ORDER BY bm25(memories_fts)
+               LIMIT ?3"#,
+        )
+        .map_err(|e| format!("prepare near-dup candidates: {}", e))?;
+
+    let rows = stmt
+        .query_map(params![sanitized, project, limit as i64], row_to_memory)
+        .map_err(|e| format!("query near-dup candidates: {}", e))?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
 pub fn count() -> Result<i64, String> {
     with_conn(|conn| {
         conn.query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))

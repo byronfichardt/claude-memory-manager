@@ -229,14 +229,7 @@ pub(crate) fn infer_project_from_transcript_with_limit(
     transcript_path: &Path,
     max_entries: usize,
 ) -> Option<PathBuf> {
-    let content = std::fs::read_to_string(transcript_path).ok()?;
-    if content.is_empty() {
-        return None;
-    }
-
-    let lines: Vec<&str> = content.lines().collect();
-    let start = lines.len().saturating_sub(max_entries);
-    let recent = &lines[start..];
+    let recent = read_tail_lines(transcript_path, max_entries)?;
 
     // Count occurrences per git root, weighted by recency (later = higher weight)
     let mut counts: HashMap<PathBuf, f64> = HashMap::new();
@@ -258,6 +251,36 @@ pub(crate) fn infer_project_from_transcript_with_limit(
         .into_iter()
         .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(root, _)| root)
+}
+
+/// First read window for `read_tail_lines`; grows 4x until it holds enough lines.
+const TAIL_INITIAL_WINDOW_BYTES: u64 = 256 * 1024;
+
+/// The last `max_lines` complete lines of `path`, read from the end of the file.
+/// Transcripts reach tens of MB, and only their tail is needed.
+fn read_tail_lines(path: &Path, max_lines: usize) -> Option<Vec<String>> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut window = TAIL_INITIAL_WINDOW_BYTES.min(len);
+    loop {
+        file.seek(SeekFrom::Start(len - window)).ok()?;
+        let mut buf = Vec::with_capacity(window as usize);
+        file.by_ref().take(window).read_to_end(&mut buf).ok()?;
+        let text = String::from_utf8_lossy(&buf);
+
+        let reached_start = window == len;
+        let mut lines: Vec<&str> = text.lines().collect();
+        if !reached_start && !lines.is_empty() {
+            lines.remove(0);
+        }
+        if reached_start || lines.len() >= max_lines {
+            let start = lines.len().saturating_sub(max_lines);
+            return Some(lines[start..].iter().map(|l| l.to_string()).collect());
+        }
+        window = (window * 4).min(len);
+    }
 }
 
 /// Extract file/directory paths from a single transcript JSONL line.
@@ -775,6 +798,25 @@ mod tests {
         let hearth = PathBuf::from("/projects/hearth");
         write_active_project_at(&file, "", Some(&hearth), 1_000);
         assert!(!file.exists());
+    }
+
+    #[test]
+    fn read_tail_lines_returns_last_complete_lines_across_window_growth() {
+        let root = tmpdir();
+        let file = root.join("long.jsonl");
+        let lines: Vec<String> = (0..60).map(|i| format!("{i}:{}", "x".repeat(10_000))).collect();
+        fs::write(&file, lines.join("\n") + "\n").unwrap();
+
+        let tail = read_tail_lines(&file, 50).unwrap();
+        assert_eq!(tail, lines[10..].to_vec());
+    }
+
+    #[test]
+    fn read_tail_lines_short_file_returns_every_line() {
+        let root = tmpdir();
+        let file = root.join("short.jsonl");
+        fs::write(&file, "a\nb\nc").unwrap();
+        assert_eq!(read_tail_lines(&file, 50).unwrap(), vec!["a", "b", "c"]);
     }
 
     fn make_tool_use_line(tool: &str, file_path: &str) -> String {
