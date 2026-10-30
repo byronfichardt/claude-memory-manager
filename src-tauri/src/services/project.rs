@@ -5,13 +5,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// How long an active-project pointer stays valid. After this, the MCP server
-/// ignores it and falls back to its startup cwd.
+/// How recently another session's pointer must have changed to be used as the
+/// fallback when a server can't identify its own session.
 const ACTIVE_PROJECT_TTL_SECS: u64 = 600;
 
-/// An unchanged pointer is rewritten once it is this old, keeping it well
-/// inside the TTL without a file write on every prompt.
-const ACTIVE_PROJECT_REFRESH_SECS: u64 = ACTIVE_PROJECT_TTL_SECS / 2;
+/// A session's pointer is only rewritten when its project changes, so it is
+/// kept until the session has been idle this long.
+const ACTIVE_PROJECT_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
 
 /// Filename (inside the memory manager data dir) for the hook→MCP project pointer.
 const ACTIVE_PROJECT_FILENAME: &str = "active-project.json";
@@ -440,26 +440,30 @@ fn write_active_project_at(
     let _ = atomic_write_json(path, &root);
 }
 
-/// True when this session already records `project` and is not yet due for a
-/// refresh. Each MCP server reads its own session's entry, so another session
-/// writing in between doesn't make this one stale. The data dir is scanned by
-/// endpoint protection, so skipping the write saves ~10-60 ms per prompt.
+/// True when this session already records `project`. Each MCP server reads its
+/// own session's entry, so the entry only needs writing when the project
+/// changes. The data dir is scanned by endpoint protection, so skipping the
+/// write saves ~10-60 ms per prompt.
 fn pointer_is_current(
     sessions: &serde_json::Map<String, serde_json::Value>,
     session_id: &str,
     project: Option<&Path>,
     now: u64,
 ) -> bool {
-    let Some(entry) = sessions.get(session_id) else {
-        return false;
-    };
-    let Some(updated_at) = entry.get("updated_at").and_then(|v| v.as_u64()) else {
+    let Some(entry) = sessions.get(session_id).filter(|e| retained(e, now)) else {
         return false;
     };
     let recorded = entry.get("project").and_then(|v| v.as_str());
     let wanted = project.map(|p| p.to_string_lossy());
 
-    recorded == wanted.as_deref() && now.saturating_sub(updated_at) < ACTIVE_PROJECT_REFRESH_SECS
+    recorded == wanted.as_deref()
+}
+
+fn retained(entry: &serde_json::Value, now: u64) -> bool {
+    entry
+        .get("updated_at")
+        .and_then(|v| v.as_u64())
+        .is_some_and(|ts| now.saturating_sub(ts) <= ACTIVE_PROJECT_RETENTION_SECS)
 }
 
 /// Claude Code passes each MCP server the id of the session that spawned it;
@@ -479,13 +483,7 @@ fn read_active_project_at(path: &Path, own_session: Option<&str>, now: u64) -> O
     let root = read_json(path)?;
     let sessions = root.get("sessions")?.as_object()?;
 
-    let fresh = |entry: &serde_json::Value| {
-        entry
-            .get("updated_at")
-            .and_then(|v| v.as_u64())
-            .is_some_and(|ts| now.saturating_sub(ts) <= ACTIVE_PROJECT_TTL_SECS)
-    };
-    if let Some(entry) = own_session.and_then(|sid| sessions.get(sid)).filter(|e| fresh(e)) {
+    if let Some(entry) = own_session.and_then(|sid| sessions.get(sid)).filter(|e| retained(e, now)) {
         return entry
             .get("project")
             .and_then(|v| v.as_str())
@@ -518,13 +516,7 @@ fn read_active_project_at(path: &Path, own_session: Option<&str>, now: u64) -> O
 }
 
 fn prune_expired_sessions(sessions: &mut serde_json::Map<String, serde_json::Value>, now: u64) {
-    sessions.retain(|_, entry| {
-        entry
-            .get("updated_at")
-            .and_then(|v| v.as_u64())
-            .map(|ts| now.saturating_sub(ts) <= ACTIVE_PROJECT_TTL_SECS)
-            .unwrap_or(false)
-    });
+    sessions.retain(|_, entry| retained(entry, now));
 }
 
 fn read_json(path: &Path) -> Option<serde_json::Value> {
@@ -766,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn active_project_rewritten_when_changed_or_refresh_due() {
+    fn active_project_rewritten_only_when_project_changes() {
         let dir = tmpdir();
         let file = dir.join("active.json");
         let hearth = PathBuf::from("/projects/hearth");
@@ -776,10 +768,25 @@ mod tests {
         write_active_project_at(&file, "sess-1", Some(&classify), 1_010);
         assert_eq!(recorded_updated_at(&file, "sess-1"), 1_010);
 
-        let refresh_due = 1_010 + ACTIVE_PROJECT_REFRESH_SECS;
-        write_active_project_at(&file, "sess-1", Some(&classify), refresh_due);
-        assert_eq!(recorded_updated_at(&file, "sess-1"), refresh_due);
+        let hours_later = 1_010 + 6 * 60 * 60;
+        write_active_project_at(&file, "sess-1", Some(&classify), hours_later);
+        assert_eq!(recorded_updated_at(&file, "sess-1"), 1_010);
+        assert_eq!(read_active_project_at(&file, Some("sess-1"), hours_later), Some(classify));
+    }
 
+    #[test]
+    fn active_project_idle_session_dropped_after_retention() {
+        let dir = tmpdir();
+        let file = dir.join("active.json");
+        let hearth = PathBuf::from("/projects/hearth");
+        let classify = PathBuf::from("/projects/classifyhq");
+
+        write_active_project_at(&file, "sess-idle", Some(&hearth), 1_000);
+        let week_later = 1_000 + ACTIVE_PROJECT_RETENTION_SECS + 1;
+        write_active_project_at(&file, "sess-new", Some(&classify), week_later);
+
+        assert!(read_json(&file).unwrap()["sessions"].get("sess-idle").is_none());
+        assert_eq!(read_active_project_at(&file, Some("sess-idle"), week_later), Some(classify));
     }
 
     #[test]
