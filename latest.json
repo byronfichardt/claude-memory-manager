@@ -1,11 +1,11 @@
 {
-  "version": "0.4.10",
-  "notes": "Per-call timing log (perf.log) for the hook and MCP tools, with lock-wait accounting.",
-  "pub_date": "2026-10-30T09:22:39Z",
+  "version": "0.4.11",
+  "notes": "Skip rewriting active-project.json on every prompt when nothing changed.",
+  "pub_date": "2026-10-30T09:56:20Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRHRjZ0pEaCt6U0djQmJVT2RER1AxWnZrRW0zcG9DekNZdVR3RUR4L3FZbkVRQytCYWpTcWtuSHAxdUVBdHpkMkJPdnBRZkwvdS9nTGQ2RUtTczNtaWdzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMzUyMTUzCWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKN1FQbFhvN3pjMkx1Vmpic1RiMkpGMCtsR0dPT0hZOFpTSUZVWm1EMWZ1cFZQcll0M0RGY0laWkNKbXo2bWw2cmJoekY4Qm1RalVJV0doL0t3OWFJQUE9PQo=",
-      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.10/Claude.Memory.Manager.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRHRRL2xpQk16bGg1UGRvTDNOK2IzN3FuZmVYSWZqM3pybnVMd2xEN2V0QTZQR3NuSGhQaXlvRWplcFA2VW1Ibm9mc0lOZiszdUxlSGdqWENiQk1jRmdvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMzU0MTY5CWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKU1ZyMDZ5bnRueHNQVEE0aFpoQW55U3k1ZXhDNjhYTTVyaFFLTWh1VHFnTnFhRldwd3hkWlEzQzNvN2lSYmdrRk1HUnhESXc5cmVsT29LWHpwM0hvQ0E9PQo=",
+      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.11/Claude.Memory.Manager.app.tar.gz"
     }
   }
 }
