@@ -14,6 +14,7 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
 
 /// Captured startup errors (directory creation, DB init) that the UI can
@@ -214,8 +215,8 @@ pub fn open_hook_connection() -> Result<Connection, String> {
     let path = db_path();
     let conn = Connection::open(&path)
         .map_err(|e| format!("open hook DB at {}: {}", path.display(), e))?;
-    conn.pragma_update(None, "busy_timeout", "5000")
-        .map_err(|e| format!("busy_timeout: {}", e))?;
+    conn.busy_handler(Some(on_busy))
+        .map_err(|e| format!("busy_handler: {}", e))?;
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(|e| format!("journal_mode: {}", e))?;
     conn.pragma_update(None, "synchronous", "NORMAL")
@@ -232,6 +233,28 @@ pub fn open_hook_connection() -> Result<Connection, String> {
     Ok(conn)
 }
 
+const BUSY_TIMEOUT_MS: u64 = 5000;
+const BUSY_RETRY_MS: u64 = 5;
+
+/// Microseconds this process has spent waiting on SQLite locks, read by
+/// `services::perf` to separate lock contention from query cost.
+static LOCK_WAIT_US: AtomicU64 = AtomicU64::new(0);
+
+pub fn lock_wait_ms() -> u64 {
+    LOCK_WAIT_US.load(Ordering::Relaxed) / 1000
+}
+
+/// Same 5s budget as `PRAGMA busy_timeout = 5000`, but counted.
+fn on_busy(attempt: i32) -> bool {
+    if attempt.max(0) as u64 * BUSY_RETRY_MS >= BUSY_TIMEOUT_MS {
+        return false;
+    }
+    let slept = std::time::Instant::now();
+    std::thread::sleep(std::time::Duration::from_millis(BUSY_RETRY_MS));
+    LOCK_WAIT_US.fetch_add(slept.elapsed().as_micros() as u64, Ordering::Relaxed);
+    true
+}
+
 /// Flush WAL to disk before the process exits.
 pub fn shutdown() {
     if let Some(pool) = POOL.get() {
@@ -244,7 +267,7 @@ pub fn shutdown() {
 fn build_pool() -> Result<Pool<SqliteConnectionManager>, String> {
     let path = db_path();
     let manager = SqliteConnectionManager::file(&path).with_init(|c| {
-        c.pragma_update(None, "busy_timeout", "5000")?;
+        c.busy_handler(Some(on_busy))?;
         c.pragma_update(None, "journal_mode", "WAL")?;
         c.pragma_update(None, "synchronous", "NORMAL")?;
         c.pragma_update(None, "foreign_keys", "ON")?;
