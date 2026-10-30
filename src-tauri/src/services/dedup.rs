@@ -223,14 +223,32 @@ pub fn find_near_duplicate<'a>(
     best
 }
 
+/// How many full-text candidates the write-time check compares against. A
+/// memory sharing ≥ `WRITE_NEAR_DUP_THRESHOLD` of its tokens ranks near the top.
+const WRITE_NEAR_DUP_CANDIDATES: u32 = 50;
+
 /// Store-backed write-time check. None means "safe to insert".
 pub fn existing_near_duplicate(
     title: &str,
     content: &str,
     project: Option<&str>,
 ) -> Result<Option<Memory>, String> {
-    let all = memories::list_all()?;
-    Ok(find_near_duplicate(&all, title, content, project).map(|(m, _)| m.clone()))
+    crate::store::with_conn(|conn| existing_near_duplicate_with_conn(conn, title, content, project))
+}
+
+pub fn existing_near_duplicate_with_conn(
+    conn: &rusqlite::Connection,
+    title: &str,
+    content: &str,
+    project: Option<&str>,
+) -> Result<Option<Memory>, String> {
+    let candidates = memories::near_duplicate_candidates_with_conn(
+        conn,
+        &format!("{title} {content}"),
+        project,
+        WRITE_NEAR_DUP_CANDIDATES,
+    )?;
+    Ok(find_near_duplicate(&candidates, title, content, project).map(|(m, _)| m.clone()))
 }
 
 /// Prefer a standing-rule type over a project note when sources disagree.

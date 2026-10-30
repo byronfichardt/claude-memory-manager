@@ -749,7 +749,7 @@ fn save_user_memory(
     let memory_type = Some("user".to_string());
     let project = project::resolve_memory_scope(memory_type.as_deref(), None, active_project);
 
-    if let Ok(Some(existing)) = dedup::existing_near_duplicate(&title, &text, project.as_deref()) {
+    if let Ok(Some(existing)) = dedup::existing_near_duplicate_with_conn(conn, &title, &text, project.as_deref()) {
         return Ok((existing.title, false));
     }
 
