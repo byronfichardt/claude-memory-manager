@@ -27,7 +27,7 @@ static SERVER_PROJECT: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 /// Best guess at the project the user is currently working on.
 /// Priority:
-///   1. Active-project pointer written by the UserPromptSubmit hook — this is
+///   1. This session's active-project pointer, written by the UserPromptSubmit hook — this is
 ///      the most accurate signal because the hook has transcript access.
 ///   2. The git root of wherever the MCP server was spawned from (startup cwd).
 ///   3. None.

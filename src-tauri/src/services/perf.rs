@@ -73,11 +73,14 @@ fn append(entry: &Value) {
     if file_size(&path).is_some_and(|len| len > MAX_LOG_BYTES) {
         let _ = std::fs::rename(&path, dir.join(ROTATED_LOG_FILE));
     }
+    // One write per line: concurrent hooks append to the same file, and a
+    // formatted write is split into many small writes that interleave.
+    let line = format!("{}\n", entry);
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
     {
-        let _ = writeln!(f, "{}", entry);
+        let _ = f.write_all(line.as_bytes());
     }
 }

@@ -398,18 +398,34 @@ fn write_active_project_at(
         return;
     }
 
-    let mut root = read_json(path).unwrap_or_else(|| serde_json::json!({ "sessions": {} }));
+    let recorded_sessions = |root: &mut serde_json::Value| {
+        root.get_mut("sessions")
+            .and_then(|v| v.as_object_mut())
+            .cloned()
+            .unwrap_or_default()
+    };
 
-    let sessions = root
-        .get_mut("sessions")
-        .and_then(|v| v.as_object_mut())
-        .cloned()
-        .unwrap_or_default();
-    let mut sessions = sessions;
+    if let Some(mut root) = read_json(path) {
+        if pointer_is_current(&recorded_sessions(&mut root), session_id, project, now) {
+            return;
+        }
+    }
 
-    if pointer_is_current(&sessions, session_id, project, now) {
+    // Hooks from parallel sessions fire together; without the lock each
+    // read-modify-write drops the entries written in between.
+    let Ok(lock) = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(path.with_extension("lock"))
+    else {
+        return;
+    };
+    if lock.lock().is_err() {
         return;
     }
+
+    let mut root = read_json(path).unwrap_or_else(|| serde_json::json!({ "sessions": {} }));
+    let mut sessions = recorded_sessions(&mut root);
 
     prune_expired_sessions(&mut sessions, now);
 
@@ -424,47 +440,58 @@ fn write_active_project_at(
     let _ = atomic_write_json(path, &root);
 }
 
-/// True when rewriting would not change what `read_active_project` returns:
-/// this session already records `project`, is strictly the freshest entry,
-/// and is not yet due for a refresh. The data dir is scanned by endpoint
-/// protection, so skipping the write saves ~10-60 ms per prompt.
+/// True when this session already records `project` and is not yet due for a
+/// refresh. Each MCP server reads its own session's entry, so another session
+/// writing in between doesn't make this one stale. The data dir is scanned by
+/// endpoint protection, so skipping the write saves ~10-60 ms per prompt.
 fn pointer_is_current(
     sessions: &serde_json::Map<String, serde_json::Value>,
     session_id: &str,
     project: Option<&Path>,
     now: u64,
 ) -> bool {
-    let updated_at = |entry: &serde_json::Value| entry.get("updated_at").and_then(|v| v.as_u64());
     let Some(entry) = sessions.get(session_id) else {
         return false;
     };
-    let Some(own_ts) = updated_at(entry) else {
+    let Some(updated_at) = entry.get("updated_at").and_then(|v| v.as_u64()) else {
         return false;
     };
     let recorded = entry.get("project").and_then(|v| v.as_str());
     let wanted = project.map(|p| p.to_string_lossy());
 
-    recorded == wanted.as_deref()
-        && now.saturating_sub(own_ts) < ACTIVE_PROJECT_REFRESH_SECS
-        && sessions
-            .iter()
-            .filter(|(sid, _)| sid.as_str() != session_id)
-            .all(|(_, other)| updated_at(other).map_or(true, |ts| ts < own_ts))
+    recorded == wanted.as_deref() && now.saturating_sub(updated_at) < ACTIVE_PROJECT_REFRESH_SECS
 }
 
-/// Read the freshest non-expired project pointer across all sessions.
-/// Returns None if the file is missing, unreadable, or every entry is stale /
-/// has `project == null`.
-///
-/// When multiple Claude sessions are active, we return the most recently
-/// updated one — almost always the session that just fired a prompt.
+/// Claude Code passes each MCP server the id of the session that spawned it;
+/// it is the same `session_id` the hook records.
+const SESSION_ID_ENV: &str = "CLAUDE_CODE_SESSION_ID";
+
+/// The project pointer for this process's own Claude session when the hook has
+/// recorded one. Without a session id (or entry), falls back to the freshest
+/// non-expired pointer across all sessions. Returns None if the file is
+/// missing, unreadable, or every candidate is stale / has `project == null`.
 pub fn read_active_project() -> Option<PathBuf> {
-    read_active_project_at(&active_project_path(), now_unix())
+    let session_id = std::env::var(SESSION_ID_ENV).ok();
+    read_active_project_at(&active_project_path(), session_id.as_deref(), now_unix())
 }
 
-fn read_active_project_at(path: &Path, now: u64) -> Option<PathBuf> {
+fn read_active_project_at(path: &Path, own_session: Option<&str>, now: u64) -> Option<PathBuf> {
     let root = read_json(path)?;
     let sessions = root.get("sessions")?.as_object()?;
+
+    let fresh = |entry: &serde_json::Value| {
+        entry
+            .get("updated_at")
+            .and_then(|v| v.as_u64())
+            .is_some_and(|ts| now.saturating_sub(ts) <= ACTIVE_PROJECT_TTL_SECS)
+    };
+    if let Some(entry) = own_session.and_then(|sid| sessions.get(sid)).filter(|e| fresh(e)) {
+        return entry
+            .get("project")
+            .and_then(|v| v.as_str())
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from);
+    }
 
     let mut best: Option<(u64, PathBuf)> = None;
     for (_sid, entry) in sessions {
@@ -701,7 +728,7 @@ mod tests {
         let project = PathBuf::from("/Users/byron/projects/personal/hearth");
 
         write_active_project_at(&file, "sess-1", Some(&project), 1_000);
-        let got = read_active_project_at(&file, 1_000);
+        let got = read_active_project_at(&file, None, 1_000);
         assert_eq!(got, Some(project));
     }
 
@@ -715,7 +742,7 @@ mod tests {
         write_active_project_at(&file, "sess-old", Some(&hearth), 1_000);
         write_active_project_at(&file, "sess-new", Some(&classify), 1_100);
 
-        let got = read_active_project_at(&file, 1_100);
+        let got = read_active_project_at(&file, None, 1_100);
         assert_eq!(got, Some(classify));
     }
 
@@ -735,11 +762,11 @@ mod tests {
         write_active_project_at(&file, "sess-1", Some(&hearth), 1_010);
 
         assert_eq!(recorded_updated_at(&file, "sess-1"), 1_000);
-        assert_eq!(read_active_project_at(&file, 1_010), Some(hearth));
+        assert_eq!(read_active_project_at(&file, None, 1_010), Some(hearth));
     }
 
     #[test]
-    fn active_project_rewritten_when_changed_stale_or_overtaken() {
+    fn active_project_rewritten_when_changed_or_refresh_due() {
         let dir = tmpdir();
         let file = dir.join("active.json");
         let hearth = PathBuf::from("/projects/hearth");
@@ -753,10 +780,35 @@ mod tests {
         write_active_project_at(&file, "sess-1", Some(&classify), refresh_due);
         assert_eq!(recorded_updated_at(&file, "sess-1"), refresh_due);
 
-        write_active_project_at(&file, "sess-2", Some(&hearth), refresh_due + 5);
-        write_active_project_at(&file, "sess-1", Some(&classify), refresh_due + 10);
-        assert_eq!(recorded_updated_at(&file, "sess-1"), refresh_due + 10);
-        assert_eq!(read_active_project_at(&file, refresh_due + 10), Some(classify));
+    }
+
+    #[test]
+    fn active_project_own_session_wins_over_fresher_session() {
+        let dir = tmpdir();
+        let file = dir.join("active.json");
+        let hearth = PathBuf::from("/projects/hearth");
+        let classify = PathBuf::from("/projects/classifyhq");
+
+        write_active_project_at(&file, "sess-1", Some(&hearth), 1_000);
+        write_active_project_at(&file, "sess-2", Some(&classify), 1_005);
+        write_active_project_at(&file, "sess-1", Some(&hearth), 1_010);
+
+        assert_eq!(recorded_updated_at(&file, "sess-1"), 1_000);
+        assert_eq!(read_active_project_at(&file, Some("sess-1"), 1_010), Some(hearth));
+        assert_eq!(read_active_project_at(&file, Some("sess-2"), 1_010), Some(classify.clone()));
+        assert_eq!(read_active_project_at(&file, Some("sess-unknown"), 1_010), Some(classify));
+    }
+
+    #[test]
+    fn active_project_own_session_without_project_does_not_borrow_another() {
+        let dir = tmpdir();
+        let file = dir.join("active.json");
+        let hearth = PathBuf::from("/projects/hearth");
+
+        write_active_project_at(&file, "sess-repo", Some(&hearth), 1_000);
+        write_active_project_at(&file, "sess-home", None, 1_005);
+
+        assert_eq!(read_active_project_at(&file, Some("sess-home"), 1_005), None);
     }
 
     #[test]
@@ -767,7 +819,7 @@ mod tests {
         write_active_project_at(&file, "sess-1", Some(&hearth), 1_000);
 
         // Read well past the TTL window
-        let got = read_active_project_at(&file, 1_000 + ACTIVE_PROJECT_TTL_SECS + 1);
+        let got = read_active_project_at(&file, None, 1_000 + ACTIVE_PROJECT_TTL_SECS + 1);
         assert!(got.is_none());
     }
 
@@ -780,7 +832,7 @@ mod tests {
         write_active_project_at(&file, "sess-1", Some(&hearth), 1_000);
         write_active_project_at(&file, "sess-1", None, 1_050);
 
-        let got = read_active_project_at(&file, 1_050);
+        let got = read_active_project_at(&file, None, 1_050);
         assert!(got.is_none());
     }
 
@@ -788,7 +840,7 @@ mod tests {
     fn active_project_read_handles_missing_file() {
         let dir = tmpdir();
         let missing = dir.join("nope.json");
-        assert!(read_active_project_at(&missing, 1_000).is_none());
+        assert!(read_active_project_at(&missing, None, 1_000).is_none());
     }
 
     #[test]
