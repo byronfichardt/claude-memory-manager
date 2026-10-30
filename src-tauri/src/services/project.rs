@@ -9,6 +9,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// ignores it and falls back to its startup cwd.
 const ACTIVE_PROJECT_TTL_SECS: u64 = 600;
 
+/// An unchanged pointer is rewritten once it is this old, keeping it well
+/// inside the TTL without a file write on every prompt.
+const ACTIVE_PROJECT_REFRESH_SECS: u64 = ACTIVE_PROJECT_TTL_SECS / 2;
+
 /// Filename (inside the memory manager data dir) for the hook→MCP project pointer.
 const ACTIVE_PROJECT_FILENAME: &str = "active-project.json";
 
@@ -380,6 +384,10 @@ fn write_active_project_at(
         .unwrap_or_default();
     let mut sessions = sessions;
 
+    if pointer_is_current(&sessions, session_id, project, now) {
+        return;
+    }
+
     prune_expired_sessions(&mut sessions, now);
 
     let entry = serde_json::json!({
@@ -391,6 +399,34 @@ fn write_active_project_at(
     root["sessions"] = serde_json::Value::Object(sessions);
 
     let _ = atomic_write_json(path, &root);
+}
+
+/// True when rewriting would not change what `read_active_project` returns:
+/// this session already records `project`, is strictly the freshest entry,
+/// and is not yet due for a refresh. The data dir is scanned by endpoint
+/// protection, so skipping the write saves ~10-60 ms per prompt.
+fn pointer_is_current(
+    sessions: &serde_json::Map<String, serde_json::Value>,
+    session_id: &str,
+    project: Option<&Path>,
+    now: u64,
+) -> bool {
+    let updated_at = |entry: &serde_json::Value| entry.get("updated_at").and_then(|v| v.as_u64());
+    let Some(entry) = sessions.get(session_id) else {
+        return false;
+    };
+    let Some(own_ts) = updated_at(entry) else {
+        return false;
+    };
+    let recorded = entry.get("project").and_then(|v| v.as_str());
+    let wanted = project.map(|p| p.to_string_lossy());
+
+    recorded == wanted.as_deref()
+        && now.saturating_sub(own_ts) < ACTIVE_PROJECT_REFRESH_SECS
+        && sessions
+            .iter()
+            .filter(|(sid, _)| sid.as_str() != session_id)
+            .all(|(_, other)| updated_at(other).map_or(true, |ts| ts < own_ts))
 }
 
 /// Read the freshest non-expired project pointer across all sessions.
@@ -447,7 +483,7 @@ fn read_json(path: &Path) -> Option<serde_json::Value> {
 }
 
 fn atomic_write_json(path: &Path, value: &serde_json::Value) -> std::io::Result<()> {
-    let tmp = path.with_extension("json.tmp");
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     std::fs::write(&tmp, bytes)?;
@@ -658,6 +694,46 @@ mod tests {
 
         let got = read_active_project_at(&file, 1_100);
         assert_eq!(got, Some(classify));
+    }
+
+    fn recorded_updated_at(file: &Path, session_id: &str) -> u64 {
+        read_json(file).unwrap()["sessions"][session_id]["updated_at"]
+            .as_u64()
+            .unwrap()
+    }
+
+    #[test]
+    fn active_project_unchanged_pointer_is_not_rewritten() {
+        let dir = tmpdir();
+        let file = dir.join("active.json");
+        let hearth = PathBuf::from("/projects/hearth");
+
+        write_active_project_at(&file, "sess-1", Some(&hearth), 1_000);
+        write_active_project_at(&file, "sess-1", Some(&hearth), 1_010);
+
+        assert_eq!(recorded_updated_at(&file, "sess-1"), 1_000);
+        assert_eq!(read_active_project_at(&file, 1_010), Some(hearth));
+    }
+
+    #[test]
+    fn active_project_rewritten_when_changed_stale_or_overtaken() {
+        let dir = tmpdir();
+        let file = dir.join("active.json");
+        let hearth = PathBuf::from("/projects/hearth");
+        let classify = PathBuf::from("/projects/classifyhq");
+
+        write_active_project_at(&file, "sess-1", Some(&hearth), 1_000);
+        write_active_project_at(&file, "sess-1", Some(&classify), 1_010);
+        assert_eq!(recorded_updated_at(&file, "sess-1"), 1_010);
+
+        let refresh_due = 1_010 + ACTIVE_PROJECT_REFRESH_SECS;
+        write_active_project_at(&file, "sess-1", Some(&classify), refresh_due);
+        assert_eq!(recorded_updated_at(&file, "sess-1"), refresh_due);
+
+        write_active_project_at(&file, "sess-2", Some(&hearth), refresh_due + 5);
+        write_active_project_at(&file, "sess-1", Some(&classify), refresh_due + 10);
+        assert_eq!(recorded_updated_at(&file, "sess-1"), refresh_due + 10);
+        assert_eq!(read_active_project_at(&file, refresh_due + 10), Some(classify));
     }
 
     #[test]
