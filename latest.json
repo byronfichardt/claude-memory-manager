@@ -1,11 +1,11 @@
 {
-  "version": "0.4.11",
-  "notes": "Skip rewriting active-project.json on every prompt when nothing changed.",
-  "pub_date": "2026-10-30T09:56:20Z",
+  "version": "0.4.12",
+  "notes": "Read only the end of the session transcript, and compare new memories only against close full-text matches.",
+  "pub_date": "2026-10-30T10:18:41Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRHRRL2xpQk16bGg1UGRvTDNOK2IzN3FuZmVYSWZqM3pybnVMd2xEN2V0QTZQR3NuSGhQaXlvRWplcFA2VW1Ibm9mc0lOZiszdUxlSGdqWENiQk1jRmdvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMzU0MTY5CWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKU1ZyMDZ5bnRueHNQVEE0aFpoQW55U3k1ZXhDNjhYTTVyaFFLTWh1VHFnTnFhRldwd3hkWlEzQzNvN2lSYmdrRk1HUnhESXc5cmVsT29LWHpwM0hvQ0E9PQo=",
-      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.11/Claude.Memory.Manager.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRHNIRnNYUkIwLzgxR1prRGNIM3lwK1p3Y296UEl3K3lpbmtUSDJrcStSZEM4M0ZWNVZHa1BGVnErYWhEbjNtUTFhU3NWTkk1UDd6QmpBZTJjV01rWGdJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMzU1NTExCWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKNUpOYTRDTk9IbzBacmJUUDhPM2wvMjA1U1pTYWNLWk9kUnlQUkZCYzBIdDFDYm9GTk5zeFIzOTBtM0tzTjNuNWV0aTlrSXRHdXFhbWpVWFc4Q0NqQUE9PQo=",
+      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.12/Claude.Memory.Manager.app.tar.gz"
     }
   }
 }
