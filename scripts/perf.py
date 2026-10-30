@@ -151,11 +151,11 @@ def bench(args: argparse.Namespace) -> None:
         empty_transcript = snapshot_dir / "transcript.jsonl"
         empty_transcript.write_text("{}\n")
         prompts = [
-            "kamal deploy rollback on the hetzner server",
+            "deploy the app and roll back if it fails",
             "the add and read in the memory manager is getting slower, investigate sqlite fts",
-            "sanity product sync underscore scratch field",
+            "where do we keep the database migrations",
             "release tauri latest.json signed bundle",
-            "odoo invoice wizard tests",
+            "write tests for the invoice wizard",
         ]
 
         def hook_event(prompt: str, transcript: Path) -> dict:
