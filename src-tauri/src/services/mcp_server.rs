@@ -11,7 +11,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::services::{dedup, project, ranking};
+use crate::services::{dedup, perf, project, ranking};
 use crate::store::{edges, memories, repo_edges};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -347,6 +347,7 @@ fn handle_tools_call(params: Value) -> Result<Value, (i32, String)> {
         .and_then(Value::as_str)
         .ok_or_else(|| (-32602, "Missing tool name".to_string()))?;
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+    let timer = perf::Timer::start();
 
     let result = match name {
         "memory_search" => tool_memory_search(arguments),
@@ -358,6 +359,15 @@ fn handle_tools_call(params: Value) -> Result<Value, (i32, String)> {
         "repo_graph" => tool_repo_graph(arguments),
         _ => Err(format!("Unknown tool: {}", name)),
     };
+
+    timer.finish(
+        "mcp",
+        name,
+        json!({
+            "ok": result.is_ok(),
+            "db_bytes": perf::file_size(&crate::store::db_path()),
+        }),
+    );
 
     match result {
         Ok(content_text) => Ok(json!({

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
-use crate::services::{dedup, project, ranking};
+use crate::services::{dedup, perf, project, ranking};
 use crate::store::{self, edges, encountered, memories, repo_edges};
 
 const MAX_RESULTS: u32 = 5;
@@ -55,6 +55,8 @@ fn detect_active_project(event: &HookEvent) -> Option<PathBuf> {
 }
 
 pub fn run() -> Result<(), String> {
+    let mut timer = perf::Timer::start();
+
     // Read JSON event from stdin
     let mut input = String::new();
     io::stdin()
@@ -73,16 +75,21 @@ pub fn run() -> Result<(), String> {
         return Ok(());
     }
 
+    timer.mark("read_input");
+
     // Hook runs as a fresh process per prompt — use a single raw connection
     // rather than spinning up a pool with a WAL checkpoint on every invoke.
     let conn = store::open_hook_connection().map_err(|e| format!("store init: {}", e))?;
+    timer.mark("open_db");
 
     // Detect active project once per invocation — reused for retrieval and save.
     let active_project = detect_active_project(&event);
+    timer.mark("detect_project");
 
     // Publish the pointer so the MCP server (which doesn't see transcript_path)
     // can scope memory_add / memory_search to the same project the hook sees.
     project::write_active_project(&event.session_id, active_project.as_deref());
+    timer.mark("write_active_project");
 
     let mut out = String::new();
 
@@ -122,8 +129,11 @@ pub fn run() -> Result<(), String> {
         }
     }
 
+    timer.mark("remember");
+
     // Hybrid retrieval: FTS5 + graph expansion + re-ranking + project affinity
     let final_hits = hybrid_search(&conn, &event.prompt, active_project.as_deref())?;
+    timer.mark("search");
 
     if !final_hits.is_empty() {
         out.push_str("<memory-context>\n");
@@ -161,6 +171,7 @@ pub fn run() -> Result<(), String> {
         }
 
         out.push_str("</memory-context>\n");
+        timer.mark("format");
 
         // Inject cross-repo context when the current project has known dependencies.
         if let Some(ref project_path) = active_project {
@@ -192,6 +203,8 @@ pub fn run() -> Result<(), String> {
             }
         }
 
+        timer.mark("repo_context");
+
         // First-encounter: fire once per repo, nudges Claude to map dependencies
         // before answering. Runs the static scanner to surface heuristic hints,
         // then asks Claude to verify and extend with what the scanner can't see.
@@ -217,6 +230,8 @@ pub fn run() -> Result<(), String> {
             }
         }
 
+        timer.mark("first_encounter");
+
         // Usage + co-access only for memories Claude actually saw.
         let ids: Vec<&str> = final_hits.iter().map(|h| h.id.as_str()).collect();
         memories::bump_access_counts(&conn, &ids);
@@ -228,6 +243,7 @@ pub fn run() -> Result<(), String> {
                 CO_ACCESS_DELTA,
             );
         }
+        timer.mark("record_access");
     }
 
     // Always-on save checklist. Appended last so Claude sees it right before
@@ -242,6 +258,19 @@ pub fn run() -> Result<(), String> {
         .write_all(out.as_bytes())
         .map_err(|e| format!("write stdout: {}", e))?;
     handle.flush().map_err(|e| format!("flush: {}", e))?;
+    timer.mark("write_output");
+
+    timer.finish(
+        "hook",
+        "UserPromptSubmit",
+        serde_json::json!({
+            "prompt_chars": event.prompt.chars().count(),
+            "hits": final_hits.len(),
+            "output_bytes": out.len(),
+            "transcript_bytes": perf::file_size(Path::new(&event.transcript_path)),
+            "db_bytes": perf::file_size(&store::db_path()),
+        }),
+    );
 
     Ok(())
 }
