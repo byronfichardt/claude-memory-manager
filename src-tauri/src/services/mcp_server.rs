@@ -79,6 +79,8 @@ pub fn run() -> io::Result<()> {
         return Err(io::Error::other(e));
     }
 
+    crate::services::maintenance::spawn(None);
+
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut stdout_lock = stdout.lock();

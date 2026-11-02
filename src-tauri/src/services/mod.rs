@@ -7,6 +7,7 @@ pub mod frontmatter;
 pub mod hook;
 pub mod ingestion;
 pub mod installer;
+pub mod maintenance;
 pub mod mcp_server;
 pub mod organizer;
 pub mod perf;
