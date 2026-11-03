@@ -76,6 +76,30 @@ impl RunGuard {
     }
 }
 
+/// `RunGuard` only covers this process. The tray app and every MCP server
+/// process run the maintenance loop, so a pass also needs this DB lease.
+const SETTING_ORGANIZE_LEASE: &str = "organize_lease_until";
+
+/// Outlives any real pass; only matters if a process dies mid-pass.
+const ORGANIZE_LEASE_SECS: i64 = 2 * 3600;
+
+struct PassLease;
+
+impl PassLease {
+    fn acquire() -> Option<Self> {
+        let now = chrono::Utc::now().timestamp();
+        settings::claim_lease(SETTING_ORGANIZE_LEASE, now, now + ORGANIZE_LEASE_SECS)
+            .unwrap_or(false)
+            .then_some(PassLease)
+    }
+}
+
+impl Drop for PassLease {
+    fn drop(&mut self) {
+        let _ = settings::release_lease(SETTING_ORGANIZE_LEASE);
+    }
+}
+
 pub const SETTING_SPLIT_THRESHOLD: &str = "split_threshold";
 const SETTING_SPLIT_LAST_SIZE_PREFIX: &str = "split_last_size:";
 const SETTING_SPLIT_LAST_THRESHOLD_PREFIX: &str = "split_last_threshold:";
@@ -284,12 +308,16 @@ pub fn auto_organize_threshold() -> i64 {
         .unwrap_or(AUTO_ORGANIZE_DEFAULT_THRESHOLD)
 }
 
+/// Drop weak and excess `relates-to` edges. Pure SQL, so it needs neither the
+/// Claude CLI nor a backlog of unclassified memories to be worth running.
+pub fn prune_weak_edges() -> Result<usize, String> {
+    edges::prune_relates_to(RELATES_PRUNE_FLOOR, RELATES_PRUNE_TOP_K)
+}
+
 /// Run a pass if auto-organize is on and enough memories are waiting to be
 /// classified. Returns `None` when the trigger conditions aren't met.
 ///
-/// Called on a timer by the tray app — the `auto_organize` setting previously
-/// had no effect at all, so unclassified memories accumulated indefinitely and
-/// the `relates-to` edge prune (Phase 5) never ran.
+/// Called by the `maintenance` loop.
 pub async fn maybe_auto_organize(handle: Option<AppHandle>) -> Option<OrganizerReport> {
     if !settings::get_bool(SETTING_AUTO_ORGANIZE, false).unwrap_or(false) {
         return None;
@@ -322,6 +350,10 @@ pub async fn run_full_pass(handle: Option<AppHandle>, force: bool) -> Result<Org
     let _guard = match RunGuard::acquire() {
         Some(g) => g,
         None => return Err("An organize pass is already running.".to_string()),
+    };
+    let _lease = match PassLease::acquire() {
+        Some(l) => l,
+        None => return Err("An organize pass is already running in another process.".to_string()),
     };
 
     let h = handle.as_ref();
@@ -403,7 +435,7 @@ pub async fn run_full_pass(handle: Option<AppHandle>, force: bool) -> Result<Org
     // edges on every prompt, so this bounded sweep every pass stops the graph
     // from growing N² and diluting the meaningful typed edges.
     emit(h, "prune", "Pruning weak relationship edges", 0, 1);
-    match edges::prune_relates_to(RELATES_PRUNE_FLOOR, RELATES_PRUNE_TOP_K) {
+    match prune_weak_edges() {
         Ok(n) => report.pruned_edges = n,
         Err(e) => report.errors.push(format!("prune edges: {}", e)),
     }
