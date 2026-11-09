@@ -1,11 +1,11 @@
 {
-  "version": "0.4.15",
-  "notes": "Background maintenance (edge pruning and auto-organize) now runs from Claude Code's MCP server processes, so it no longer needs the tray app open.",
-  "pub_date": "2026-11-03T14:15:04Z",
+  "version": "0.4.16",
+  "notes": "Resolve contradicting memories in Dreaming; replaced memories no longer boosted; stale suggestions archive instead of delete.",
+  "pub_date": "2026-11-09T18:12:28Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRHQxRkV0VkpBR01Pd01UeDR4UktHWUxzbXp4aXJlWmphRk8zN0NSUHErVlpzSTJpSVJPZU9FYnJ4VkN3NjVJVlFUdWVKSklvK0ZCc1lQTnFEajhDNkF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzNzE1Mjg5CWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKdTZYLzg0Uy9qSlh2UnFIN3B5ZGRwZ1FWZHR6aitOdlRiTlJpOVdHMmdscUV1VkYwL21waC9zVDdtYTlRUG5QbGlTQ3JSQzNUWldBbFI0OFBoeldyQUE9PQo=",
-      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.15/Claude.Memory.Manager.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRHJJSDZUWXFncFptVXZkTm0wbHFoLzlvZFNwbGhnaFRtZTVscmxBc0NVODRCVStvZFJueDMrZTUwT0NGZnBySDhOQjEyam9HNWdWQnRmZ0hsZXhSWEFzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MjQ3OTM2CWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKS0ZxeUMzdjRqU0FvNklxQWh2blNXVWJGYjFyeHhRUHVJczhjZTRnRzBwcEQ1UUxUQnBmMkZ4M1VLVFJnWmlaU2d6RWZHZWR0dEFnUXBUZ1BaUHJvQ2c9PQo=",
+      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.16/Claude.Memory.Manager.app.tar.gz"
     }
   }
 }
