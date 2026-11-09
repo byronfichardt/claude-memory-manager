@@ -77,6 +77,7 @@ pub fn run() {
             commands::autopilot::get_dream_proposal_count,
             commands::autopilot::apply_dream_proposal,
             commands::autopilot::dismiss_dream_proposal,
+            commands::autopilot::resolve_conflict_proposal,
         ])
         .setup(|app| {
             // On macOS, set as accessory app so it doesn't appear in the Dock

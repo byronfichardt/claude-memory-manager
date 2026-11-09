@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, watch } from "vue";
 import { useAppStore } from "@/stores/app";
-import type { DreamProposal } from "@/types";
+import { useTauri } from "@/composables/useTauri";
+import type { DreamProposal, Memory } from "@/types";
 
 const app = useAppStore();
+const tauri = useTauri();
 const expanded = ref<Set<string>>(new Set());
+const conflictMemories = ref<Record<string, Memory | null>>({});
 
 onMounted(() => {
   // Reload proposals when entering the view (catches proposals from a run
@@ -26,6 +29,29 @@ async function dismiss(proposal: DreamProposal) {
   } catch (e) {
     // error surfaces via store
   }
+}
+
+async function keep(proposal: DreamProposal, keepId: string) {
+  try {
+    await app.resolveConflictProposal(proposal.id, keepId);
+  } catch (e) {
+    // error surfaces via store
+  }
+}
+
+function conflictSides(p: DreamProposal): string[] {
+  return [p.related_memory_id, p.target_memory_id].filter((id): id is string => !!id);
+}
+
+async function loadConflictMemories(proposals: DreamProposal[]) {
+  const missing = proposals
+    .flatMap(conflictSides)
+    .filter((id) => !(id in conflictMemories.value));
+  const fetched = await Promise.allSettled(missing.map((id) => tauri.fetchMemory(id)));
+  missing.forEach((id, i) => {
+    const result = fetched[i];
+    if (result.status === "fulfilled") conflictMemories.value[id] = result.value;
+  });
 }
 
 async function applyAll() {
@@ -54,6 +80,12 @@ const newProposals = computed(() =>
 const staleProposals = computed(() =>
   app.dreamProposals.filter((p) => p.proposal_type === "stale"),
 );
+
+const conflictProposals = computed(() =>
+  app.dreamProposals.filter((p) => p.proposal_type === "conflict"),
+);
+
+watch(conflictProposals, loadConflictMemories, { immediate: true });
 
 const memoryTypeLabel: Record<string, string> = {
   feedback: "feedback",
@@ -86,7 +118,7 @@ const memoryTypeLabel: Record<string, string> = {
       </div>
 
       <p class="dream-description">
-        Reviews your recent Claude Code sessions, mines patterns and facts not yet in memory, and flags entries that may be outdated.
+        Reviews your recent Claude Code sessions, mines patterns and facts not yet in memory, and flags entries that may be outdated. Contradicting memories found while organizing wait here for you to pick one.
       </p>
 
       <!-- Progress bar -->
@@ -155,11 +187,52 @@ const memoryTypeLabel: Record<string, string> = {
           <button v-if="newProposals.length > 0" class="bulk-btn apply-all" @click="applyAll">
             Apply all new
           </button>
-          <button class="bulk-btn dismiss-all" @click="dismissAll">
+          <button
+            v-if="newProposals.length + staleProposals.length > 0"
+            class="bulk-btn dismiss-all"
+            @click="dismissAll"
+          >
             Dismiss all
           </button>
         </div>
       </div>
+
+      <!-- Conflicts section -->
+      <section v-if="conflictProposals.length > 0" class="proposal-section">
+        <h2 class="section-title">
+          <span class="section-dot conflict-dot"></span>
+          Contradicting memories
+          <span class="section-count">{{ conflictProposals.length }}</span>
+        </h2>
+        <div class="proposal-list">
+          <div v-for="p in conflictProposals" :key="p.id" class="proposal-card">
+            <div class="card-reasoning">{{ p.reasoning }} Keep the one that is right; the other is archived and can be restored with Undo.</div>
+            <div class="conflict-sides">
+              <div v-for="sideId in conflictSides(p)" :key="sideId" class="conflict-side">
+                <template v-if="conflictMemories[sideId]">
+                  <div class="card-meta">
+                    <span
+                      v-if="conflictMemories[sideId]!.memory_type"
+                      class="type-badge"
+                      :class="`type-${conflictMemories[sideId]!.memory_type}`"
+                    >
+                      {{ conflictMemories[sideId]!.memory_type }}
+                    </span>
+                    <span class="card-title">{{ conflictMemories[sideId]!.title }}</span>
+                  </div>
+                  <div class="card-content side-content">{{ conflictMemories[sideId]!.content }}</div>
+                  <button class="action-btn apply-btn" @click="keep(p, sideId)">Keep this one</button>
+                </template>
+                <div v-else-if="sideId in conflictMemories" class="side-missing">Memory no longer exists</div>
+                <div v-else class="side-missing">Loading…</div>
+              </div>
+            </div>
+            <div class="card-actions">
+              <button class="action-btn dismiss-btn" @click="dismiss(p)">Keep both</button>
+            </div>
+          </div>
+        </div>
+      </section>
 
       <!-- New memories section -->
       <section v-if="newProposals.length > 0" class="proposal-section">
@@ -229,7 +302,7 @@ const memoryTypeLabel: Record<string, string> = {
             </div>
 
             <div class="card-actions">
-              <button class="action-btn delete-btn" @click="apply(p)">Delete memory</button>
+              <button class="action-btn delete-btn" @click="apply(p)">Archive memory</button>
               <button class="action-btn dismiss-btn" @click="dismiss(p)">Keep it</button>
             </div>
           </div>
@@ -422,6 +495,7 @@ const memoryTypeLabel: Record<string, string> = {
 .section-dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; flex-shrink: 0; }
 .new-dot { background: var(--color-accent); }
 .stale-dot { background: #e0a050; }
+.conflict-dot { background: #e57373; }
 .section-count { margin-left: auto; font-weight: 400; }
 
 /* ── Proposal cards ── */
@@ -522,4 +596,22 @@ const memoryTypeLabel: Record<string, string> = {
 .delete-btn:hover { background: color-mix(in srgb, #e57373 12%, transparent); }
 .dismiss-btn { color: var(--color-text-muted); }
 .dismiss-btn:hover { color: var(--color-text-primary); border-color: var(--color-text-muted); }
+
+.conflict-sides {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 0.5rem;
+  margin: 0.625rem 0;
+}
+.conflict-side {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.625rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.375rem;
+}
+.conflict-side .action-btn { align-self: flex-start; margin-top: auto; }
+.side-content { max-height: 10rem; overflow-y: auto; }
+.side-missing { font-size: 0.8125rem; color: var(--color-text-muted); }
 </style>

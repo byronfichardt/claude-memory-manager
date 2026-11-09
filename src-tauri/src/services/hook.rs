@@ -335,11 +335,11 @@ fn hybrid_search(
     let fts_id_set: std::collections::HashSet<&str> = fts_ids.iter().copied().collect();
     let mut neighbor_ids: Vec<String> = Vec::new();
     for edge in &neighbor_edges {
-        let other = if fts_id_set.contains(edge.source_id.as_str()) {
-            &edge.target_id
-        } else {
-            &edge.source_id
-        };
+        let other_is_target = fts_id_set.contains(edge.source_id.as_str());
+        let other = if other_is_target { &edge.target_id } else { &edge.source_id };
+        if !ranking::graph_edge_boosts_end(&edge.edge_type, other_is_target) {
+            continue;
+        }
         if !fts_id_set.contains(other.as_str()) && !neighbor_ids.contains(other) {
             neighbor_ids.push(other.clone());
         }
@@ -351,10 +351,10 @@ fn hybrid_search(
 
     for edge in &neighbor_edges {
         // For each edge, determine which end is an FTS hit and compute boost for the other end
-        let (fts_end, other_end) = if fts_score_map.contains_key(edge.source_id.as_str()) {
-            (edge.source_id.as_str(), edge.target_id.as_str())
+        let (fts_end, other_end, other_is_target) = if fts_score_map.contains_key(edge.source_id.as_str()) {
+            (edge.source_id.as_str(), edge.target_id.as_str(), true)
         } else if fts_score_map.contains_key(edge.target_id.as_str()) {
-            (edge.target_id.as_str(), edge.source_id.as_str())
+            (edge.target_id.as_str(), edge.source_id.as_str(), false)
         } else {
             continue;
         };
@@ -362,14 +362,18 @@ fn hybrid_search(
         let fts_score = fts_score_map.get(fts_end).copied().unwrap_or(0.0);
         let boost_value = edge.weight * fts_score;
 
-        let entry = graph_boost.entry(other_end.to_string()).or_insert((0.0, 0));
-        entry.0 += boost_value;
-        entry.1 += 1;
+        if ranking::graph_edge_boosts_end(&edge.edge_type, other_is_target) {
+            let entry = graph_boost.entry(other_end.to_string()).or_insert((0.0, 0));
+            entry.0 += boost_value;
+            entry.1 += 1;
+        }
 
         // Also boost the FTS hit itself (bidirectional benefit)
-        let entry = graph_boost.entry(fts_end.to_string()).or_insert((0.0, 0));
-        entry.0 += edge.weight * 0.5; // smaller self-boost
-        entry.1 += 1;
+        if ranking::graph_edge_boosts_end(&edge.edge_type, !other_is_target) {
+            let entry = graph_boost.entry(fts_end.to_string()).or_insert((0.0, 0));
+            entry.0 += edge.weight * 0.5; // smaller self-boost
+            entry.1 += 1;
+        }
     }
 
     // Step 5: Score and rank all candidates

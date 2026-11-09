@@ -206,6 +206,7 @@ export const useAppStore = defineStore("app", () => {
       lastOrganizeReport.value = await tauri.runOrganizePass(force);
       await loadStatus();
       await loadTopics();
+      await loadDreamProposals();
     } catch (e) {
       error.value = String(e);
     } finally {
@@ -365,6 +366,11 @@ export const useAppStore = defineStore("app", () => {
     dreamProposals.value = dreamProposals.value.filter((p) => p.id !== id);
   }
 
+  async function resolveConflictProposal(id: string, keepId: string) {
+    await tauri.resolveConflictProposal(id, keepId);
+    dreamProposals.value = dreamProposals.value.filter((p) => p.id !== id);
+  }
+
   async function initialize() {
     await loadStatus();
     await loadAutoOrganize();
@@ -436,5 +442,6 @@ export const useAppStore = defineStore("app", () => {
     loadDreamProposals,
     applyDreamProposal,
     dismissDreamProposal,
+    resolveConflictProposal,
   };
 });

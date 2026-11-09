@@ -319,6 +319,7 @@ async fn mine_new_memories(
         memory_type: p.memory_type,
         reasoning: p.reasoning,
         target_memory_id: None,
+        related_memory_id: None,
         status: "pending".to_string(),
         created_at: now,
     }).collect())
@@ -372,6 +373,7 @@ async fn detect_stale_memories(
         memory_type: String::new(),
         reasoning: s.reasoning,
         target_memory_id: Some(s.memory_id),
+        related_memory_id: None,
         status: "pending".to_string(),
         created_at: now,
     }).collect())

@@ -168,13 +168,14 @@ export type DateFilter = "all" | "7d" | "30d" | "90d";
 
 export interface DreamProposal {
   id: string;
-  proposal_type: "new" | "stale";
+  proposal_type: "new" | "stale" | "conflict";
   title: string;
   content: string;
   description: string;
   memory_type: string;
   reasoning: string;
   target_memory_id: string | null;
+  related_memory_id: string | null;
   status: "pending" | "applied" | "dismissed";
   created_at: number;
 }
@@ -200,6 +201,7 @@ export interface OrganizerReport {
   edges_created: number;
   consolidated_topics: string[];
   split_topics: string[];
+  conflicts_raised?: number;
   errors: string[];
 }
 
