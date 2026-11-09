@@ -623,7 +623,7 @@ pub async fn get_dream_proposal_count() -> Result<i64, String> {
 }
 
 /// Apply a "new" proposal — inserts it into the memory store.
-/// Apply a "stale" proposal — deletes the flagged memory.
+/// Apply a "stale" proposal — archives the flagged memory (reversible).
 #[tauri::command]
 pub async fn apply_dream_proposal(id: String) -> Result<(), String> {
     blocking(move || {
@@ -644,15 +644,31 @@ pub async fn apply_dream_proposal(id: String) -> Result<(), String> {
             }
             "stale" => {
                 if let Some(ref target_id) = proposal.target_memory_id {
-                    memories::delete(target_id)?;
+                    if memories::archive(target_id)? {
+                        history::record(
+                            "archive",
+                            serde_json::json!({
+                                "action": "archive",
+                                "reason": "stale",
+                                "memory_id": target_id,
+                                "dream_proposal_id": proposal.id,
+                            }),
+                        )?;
+                    }
                 }
             }
+            "conflict" => return Err("resolve a conflict by choosing which memory to keep".to_string()),
             _ => {}
         }
 
         dreams::set_status(&id, "applied")
     })
     .await
+}
+
+#[tauri::command]
+pub async fn resolve_conflict_proposal(id: String, keep_id: String) -> Result<(), String> {
+    blocking(move || organizer::resolve_conflict(&id, &keep_id)).await
 }
 
 #[tauri::command]

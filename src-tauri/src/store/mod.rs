@@ -349,7 +349,26 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
             .map_err(|e| format!("bump v9: {}", e))?;
     }
 
+    if version < 10 {
+        apply_migration_v10(conn)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (10)", [])
+            .map_err(|e| format!("bump v10: {}", e))?;
+    }
+
     Ok(())
+}
+
+/// A conflict proposal names both sides of a `contradicts` edge.
+fn apply_migration_v10(conn: &Connection) -> Result<(), String> {
+    let has_col: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('dream_proposals') WHERE name = 'related_memory_id'")
+        .and_then(|mut s| s.exists([]))
+        .unwrap_or(false);
+    if has_col {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE dream_proposals ADD COLUMN related_memory_id TEXT;")
+        .map_err(|e| format!("migration v10: {}", e))
 }
 
 /// Adds a nullable `archived_at` column to `memories`. Archived memories stay in

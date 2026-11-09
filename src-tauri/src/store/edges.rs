@@ -261,6 +261,30 @@ pub fn get_neighbors_deep(memory_id: &str, depth: u32) -> Result<Vec<MemoryEdge>
     })
 }
 
+pub fn list_by_type(edge_type: &str) -> Result<Vec<MemoryEdge>, String> {
+    with_conn(|conn| {
+        let mut stmt = conn
+            .prepare("SELECT * FROM memory_edges WHERE edge_type = ?1")
+            .map_err(|e| format!("prepare list_by_type: {}", e))?;
+        let rows = stmt
+            .query_map(params![edge_type], row_to_edge)
+            .map_err(|e| format!("query list_by_type: {}", e))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+    })
+}
+
+/// Delete `edge_type` edges between `a` and `b` in either direction.
+pub fn delete_between(a: &str, b: &str, edge_type: &str) -> Result<usize, String> {
+    with_conn(|conn| {
+        conn.execute(
+            r#"DELETE FROM memory_edges WHERE edge_type = ?3
+               AND ((source_id = ?1 AND target_id = ?2) OR (source_id = ?2 AND target_id = ?1))"#,
+            params![a, b, edge_type],
+        )
+        .map_err(|e| format!("delete_between: {}", e))
+    })
+}
+
 /// List all edges for a specific memory (for UI display).
 pub fn list_by_memory(memory_id: &str) -> Result<Vec<MemoryEdge>, String> {
     get_neighbors(memory_id)

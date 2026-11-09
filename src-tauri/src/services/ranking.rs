@@ -132,6 +132,12 @@ pub fn graph_edge_usable(edge_type: &str, weight: f64) -> bool {
         && matches!(edge_type, "relates-to" | "depends-on" | "supersedes")
 }
 
+/// A `supersedes` edge points new -> old; the replaced memory must never gain
+/// rank from its replacement.
+pub fn graph_edge_boosts_end(edge_type: &str, end_is_target: bool) -> bool {
+    !(edge_type == "supersedes" && end_is_target)
+}
+
 pub fn usage_score(access_count: i64) -> f64 {
     let n = access_count.max(0) as f64;
     (1.0 + n).ln() / (201.0_f64).ln()
@@ -397,5 +403,12 @@ mod tests {
             context_tag(Some("feedback"), None),
             "standing rule · global"
         );
+    }
+
+    #[test]
+    fn superseded_memory_gets_no_boost_from_its_replacement() {
+        assert!(!graph_edge_boosts_end("supersedes", true));
+        assert!(graph_edge_boosts_end("supersedes", false));
+        assert!(graph_edge_boosts_end("relates-to", true));
     }
 }

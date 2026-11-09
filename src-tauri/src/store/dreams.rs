@@ -6,13 +6,15 @@ use super::with_conn;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DreamProposal {
     pub id: String,
-    pub proposal_type: String, // "new" | "stale"
+    pub proposal_type: String, // "new" | "stale" | "conflict"
     pub title: String,
     pub content: String,
     pub description: String,
     pub memory_type: String,
     pub reasoning: String,
     pub target_memory_id: Option<String>,
+    #[serde(default)]
+    pub related_memory_id: Option<String>,
     pub status: String, // "pending" | "applied" | "dismissed"
     pub created_at: i64,
 }
@@ -27,6 +29,7 @@ fn row_to_proposal(row: &Row) -> rusqlite::Result<DreamProposal> {
         memory_type: row.get("memory_type")?,
         reasoning: row.get("reasoning")?,
         target_memory_id: row.get("target_memory_id")?,
+        related_memory_id: row.get("related_memory_id")?,
         status: row.get("status")?,
         created_at: row.get("created_at")?,
     })
@@ -40,8 +43,8 @@ pub fn save_proposal(proposal: &DreamProposal) -> Result<(), String> {
     with_conn(|conn| {
         conn.execute(
             r#"INSERT OR REPLACE INTO dream_proposals
-               (id, proposal_type, title, content, description, memory_type, reasoning, target_memory_id, status, created_at)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+               (id, proposal_type, title, content, description, memory_type, reasoning, target_memory_id, related_memory_id, status, created_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"#,
             params![
                 proposal.id,
                 proposal.proposal_type,
@@ -51,6 +54,7 @@ pub fn save_proposal(proposal: &DreamProposal) -> Result<(), String> {
                 proposal.memory_type,
                 proposal.reasoning,
                 proposal.target_memory_id,
+                proposal.related_memory_id,
                 proposal.status,
                 proposal.created_at,
             ],
@@ -61,7 +65,8 @@ pub fn save_proposal(proposal: &DreamProposal) -> Result<(), String> {
 }
 
 pub fn save_proposals(proposals: &[DreamProposal]) -> Result<(), String> {
-    // Clear pending proposals before saving new batch — each dream run is a fresh slate
+    // Each dream run is a fresh slate for its own proposals; organizer-raised
+    // conflicts survive it.
     clear_pending()?;
     for p in proposals {
         save_proposal(p)?;
@@ -124,9 +129,26 @@ pub fn pending_count() -> Result<i64, String> {
 
 fn clear_pending() -> Result<(), String> {
     with_conn(|conn| {
-        conn.execute("DELETE FROM dream_proposals WHERE status = 'pending'", [])
+        conn.execute(
+            "DELETE FROM dream_proposals WHERE status = 'pending' AND proposal_type != 'conflict'",
+            [],
+        )
             .map_err(|e| format!("clear pending dreams: {}", e))?;
         Ok(())
+    })
+}
+
+/// Any proposal, in any status, already raised for this pair. A dismissed
+/// conflict means "keep both" and is never raised again.
+pub fn conflict_exists(a: &str, b: &str) -> Result<bool, String> {
+    with_conn(|conn| {
+        conn.prepare(
+            r#"SELECT 1 FROM dream_proposals WHERE proposal_type = 'conflict'
+               AND ((target_memory_id = ?1 AND related_memory_id = ?2)
+                 OR (target_memory_id = ?2 AND related_memory_id = ?1))"#,
+        )
+        .and_then(|mut s| s.exists(params![a, b]))
+        .map_err(|e| format!("conflict_exists: {}", e))
     })
 }
 
