@@ -211,6 +211,7 @@ export interface OrganizerReport {
   consolidated_topics: string[];
   split_topics: string[];
   conflicts_raised?: number;
+  snapshots_archived?: number;
   errors: string[];
 }
 

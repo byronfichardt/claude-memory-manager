@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 
 use crate::services::{dedup, perf, project, ranking};
-use crate::store::{self, edges, encountered, memories, repo_edges};
+use crate::store::{self, edges, encountered, memories, repo_edges, snapshots};
 
 const MAX_RESULTS: u32 = 5;
 const MAX_SNIPPET_CHARS: usize = 300;
@@ -610,7 +610,8 @@ const SAVE_CHECKLIST: &str = "\
 Before replying, scan this turn for memory-worthy signals:
 - user correction or stated preference/convention
 - non-obvious project fact, debugging gotcha + fix, or architecture decision + rationale
-- project state change (status, ownership, deadlines)
+- a lasting project decision (ownership, deadlines, chosen approach)
+Not memory-worthy: progress/status snapshots (\"X is done\", handoff notes, what's left to do).
 If any apply, call memory_add NOW — do not batch to end of session. Saves are cheap; reconstructing lost context is not.
 
 Repo relationship signals — call repo_link if you notice:
@@ -753,6 +754,9 @@ fn save_user_memory(
     let memory_type = Some("user".to_string());
     let project = project::resolve_memory_scope(memory_type.as_deref(), None, active_project);
 
+    if let Ok(Some(tombstone)) = snapshots::tombstone_for_with_conn(conn, &title, "", &text) {
+        return Ok((tombstone.title, false));
+    }
     if let Ok(Some(existing)) = dedup::existing_near_duplicate_with_conn(conn, &title, &text, project.as_deref()) {
         return Ok((existing.title, false));
     }

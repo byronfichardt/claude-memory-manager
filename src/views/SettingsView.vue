@@ -984,7 +984,8 @@ function goHome() {
                 merged <span class="num">{{ app.lastOrganizeReport.merged_count }}</span><template v-if="app.lastOrganizeReport.new_topics_created.length">,
                 {{ app.lastOrganizeReport.new_topics_created.length }} new topic<template v-if="app.lastOrganizeReport.new_topics_created.length !== 1">s</template></template><template v-if="app.lastOrganizeReport.split_topics?.length">,
                 split <span class="num">{{ app.lastOrganizeReport.split_topics.length }}</span> topic<template v-if="app.lastOrganizeReport.split_topics.length !== 1">s</template></template><template v-if="app.lastOrganizeReport.conflicts_raised">,
-                <span class="num">{{ app.lastOrganizeReport.conflicts_raised }}</span> contradiction<template v-if="app.lastOrganizeReport.conflicts_raised !== 1">s</template> to resolve in Dreaming</template>.
+                <span class="num">{{ app.lastOrganizeReport.conflicts_raised }}</span> contradiction<template v-if="app.lastOrganizeReport.conflicts_raised !== 1">s</template> to resolve in Dreaming</template><template v-if="app.lastOrganizeReport.snapshots_archived">,
+                archived <span class="num">{{ app.lastOrganizeReport.snapshots_archived }}</span> stale status snapshot<template v-if="app.lastOrganizeReport.snapshots_archived !== 1">s</template></template>.
                 <template v-if="app.lastOrganizeReport.errors?.length">
                   <span class="organize-errors">
                     {{ app.lastOrganizeReport.errors.length }} error{{ app.lastOrganizeReport.errors.length === 1 ? '' : 's' }}:

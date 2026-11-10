@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::services::{dedup, perf, project, ranking};
-use crate::store::{edges, memories, repo_edges};
+use crate::store::{edges, memories, repo_edges, snapshots};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const RULES_OVERFETCH: u32 = 3;
@@ -202,7 +202,7 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "memory_add",
-                "description": "Save a new memory to the store. You MUST call this proactively — don't wait for the user to ask. Save user corrections, project conventions, debugging findings, stated preferences, architecture decisions, workflow discoveries, and project state changes. A typical session should produce 3-10 memories. Be specific and include enough context that the memory is useful in future sessions.\n\nPROJECT SCOPING: If the memory is a user preference or cross-project rule (type=user/feedback/reference), leave `project` unset — it will be saved as global. If it's a specific fact about the current codebase (type=project), set `project` to the absolute git-root path of that project. Type=user is ALWAYS saved as global regardless.\n\nCORRECTING AN EXISTING MEMORY: if this memory corrects, replaces or updates one you just read, you MUST pass its id in `supersedes`. Writing a bare 'CORRECTION: ...' memory does NOT retire the old one — dedup will not catch it, because a correction is worded differently from what it corrects, and BOTH will keep being recalled as equally valid. Search first, then supersede.",
+                "description": "Save a new memory to the store. You MUST call this proactively — don't wait for the user to ask. Save user corrections, project conventions, debugging findings, stated preferences, architecture decisions, and workflow discoveries. A typical session should produce 3-10 memories. Be specific and include enough context that the memory is useful in future sessions.\n\nDO NOT SAVE STATUS SNAPSHOTS: progress logs, 'X is done/shipped/merged', handoff notes, what is left to do, or the current state of a ticket. They go stale within days and are archived automatically; a near-copy of an archived snapshot is refused. Save the lasting lesson instead (the decision, the gotcha, how it works).\n\nPROJECT SCOPING: If the memory is a user preference or cross-project rule (type=user/feedback/reference), leave `project` unset — it will be saved as global. If it's a specific fact about the current codebase (type=project), set `project` to the absolute git-root path of that project. Type=user is ALWAYS saved as global regardless.\n\nCORRECTING AN EXISTING MEMORY: if this memory corrects, replaces or updates one you just read, you MUST pass its id in `supersedes`. Writing a bare 'CORRECTION: ...' memory does NOT retire the old one — dedup will not catch it, because a correction is worded differently from what it corrects, and BOTH will keep being recalled as equally valid. Search first, then supersede.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -563,6 +563,13 @@ fn tool_memory_add(args: Value) -> Result<String, String> {
         explicit_project,
         detected.as_deref(),
     );
+
+    if let Some(tombstone) = snapshots::tombstone_for(&title, &description, &content)? {
+        return Ok(format!(
+            "Not saved: this matches a status snapshot that was archived as stale.\nid: {}\ntitle: {}\nStatus snapshots (progress, done/shipped/merged, handoffs) are not kept as memories. If there is a lasting lesson here, save that instead, worded as the lesson.",
+            tombstone.id, tombstone.title
+        ));
+    }
 
     if let Some(existing) = dedup::existing_near_duplicate(&title, &content, project.as_deref())? {
         // A memory that supersedes its near-twin is the intended case for a
