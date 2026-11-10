@@ -148,7 +148,9 @@ pub enum ConflictVerdict {
     Ask,
 }
 
-/// The newer memory wins unless it is a project note disputing a standing rule.
+/// The newer memory wins, except that a project note never overrides a
+/// standing rule (ask), and a project-scoped memory never archives a global one
+/// (a local exception, so both stay).
 pub fn conflict_verdict(
     a: (Option<&str>, Option<&str>, i64),
     b: (Option<&str>, Option<&str>, i64),
@@ -158,13 +160,15 @@ pub fn conflict_verdict(
     if matches!((a_project, b_project), (Some(x), Some(y)) if x != y) {
         return ConflictVerdict::Unrelated;
     }
-    let (newer, newer_type, older_type) = if a_created >= b_created {
-        (0, a_type, b_type)
+    let (newer, newer_type, older_type, local_beats_global) = if a_created >= b_created {
+        (0, a_type, b_type, a_project.is_some() && b_project.is_none())
     } else {
-        (1, b_type, a_type)
+        (1, b_type, a_type, b_project.is_some() && a_project.is_none())
     };
     if is_standing_rule(older_type) && !is_standing_rule(newer_type) {
         ConflictVerdict::Ask
+    } else if local_beats_global {
+        ConflictVerdict::Unrelated
     } else {
         ConflictVerdict::Keep(newer)
     }
@@ -465,6 +469,14 @@ mod tests {
         );
         assert_eq!(
             conflict_verdict(side("feedback", None, 1), side("feedback", Some("/a"), 2)),
+            ConflictVerdict::Unrelated
+        );
+        assert_eq!(
+            conflict_verdict(side("project", None, 1), side("project", Some("/a"), 2)),
+            ConflictVerdict::Unrelated
+        );
+        assert_eq!(
+            conflict_verdict(side("feedback", Some("/a"), 1), side("feedback", None, 2)),
             ConflictVerdict::Keep(1)
         );
     }

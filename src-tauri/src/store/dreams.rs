@@ -161,6 +161,17 @@ pub fn find_conflict(a: &str, b: &str) -> Result<Option<DreamProposal>, String> 
     })
 }
 
+pub fn pending_conflict_count() -> Result<i64, String> {
+    with_conn(|conn| {
+        conn.query_row(
+            "SELECT COUNT(*) FROM dream_proposals WHERE status = 'pending' AND proposal_type = 'conflict'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())
+    })
+}
+
 pub fn reopen_conflict(id: &str) -> Result<(), String> {
     with_conn(|conn| {
         conn.execute(

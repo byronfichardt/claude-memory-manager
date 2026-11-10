@@ -234,6 +234,9 @@ pub struct OrganizerReport {
     /// Contradictions dropped because the memories belong to different projects.
     #[serde(default)]
     pub conflicts_dropped: usize,
+    /// Contradictions waiting in Dreaming for the user after this pass.
+    #[serde(default)]
+    pub conflicts_waiting: usize,
     pub errors: Vec<String>,
 }
 
@@ -1173,7 +1176,7 @@ fn undo_archive(snapshot: &serde_json::Value) -> Result<(), String> {
     if resolved_conflict {
         if let Some(kept) = field("superseded_by") {
             edges::delete_between(kept, memory_id, "supersedes")?;
-            edges::insert(kept, memory_id, "contradicts", 0.5, "user_resolved")?;
+            edges::insert(kept, memory_id, "contradicts", 0.5, field("origin").unwrap_or("user_resolved"))?;
         }
     }
     if let Some(proposal_id) = field("dream_proposal_id") {
@@ -1599,6 +1602,7 @@ pub fn settle_conflicts(report: &mut OrganizerReport) -> Result<(), String> {
             }
         }
     }
+    report.conflicts_waiting = dreams::pending_conflict_count()? as usize;
     Ok(())
 }
 
@@ -1895,6 +1899,26 @@ mod tests {
             (report.conflicts_auto_resolved, report.conflicts_dropped, report.conflicts_raised)
         };
 
+        let status_of = |a: &memories::Memory, b: &memories::Memory| {
+            dreams::find_conflict(&a.id, &b.id).unwrap().unwrap().status
+        };
+
+        let backlog_old = new("Cache for an hour", "project", Some("/p/a"), 100);
+        let backlog_new = new("Cache for a day", "project", Some("/p/a"), 200);
+        contradict(&backlog_old, &backlog_new);
+        save_conflict_proposal(&backlog_old, &backlog_new, "raised by an older version").unwrap();
+
+        let kept_a = new("Tabs", "project", Some("/p/a"), 100);
+        let kept_b = new("Spaces", "project", Some("/p/a"), 200);
+        contradict(&kept_a, &kept_b);
+        let kept_id = save_conflict_proposal(&kept_a, &kept_b, "raised by an older version").unwrap();
+        dreams::set_status(&kept_id, "dismissed").unwrap();
+
+        let card_a = new("Port 8080", "project", Some("/p/a"), 100);
+        let card_b = new("Port 3000", "project", Some("/p/c"), 200);
+        contradict(&card_a, &card_b);
+        save_conflict_proposal(&card_a, &card_b, "raised by an older version").unwrap();
+
         let old_note = new("Deploy with kubernetes", "project", Some("/p/a"), 100);
         let new_rule = new("Deploy with kamal", "feedback", None, 200);
         contradict(&old_note, &new_rule);
@@ -1907,8 +1931,17 @@ mod tests {
         let new_note = new("Write to prod for this fix", "project", Some("/p/a"), 200);
         contradict(&old_rule, &new_note);
 
-        assert_eq!(settle(), (1, 1, 1));
+        assert_eq!(settle(), (2, 2, 1));
+        assert!(archived(&backlog_old) && !archived(&backlog_new));
+        assert_eq!(status_of(&backlog_old, &backlog_new), "applied");
+        assert!(!archived(&kept_a) && !archived(&kept_b));
+        assert_eq!(status_of(&kept_a, &kept_b), "dismissed");
+        assert_eq!(status_of(&card_a, &card_b), "dismissed");
+        assert!(edges::list_by_memory(&card_a.id).unwrap().is_empty());
         assert!(archived(&old_note) && !archived(&new_rule));
+        let mut report = OrganizerReport::default();
+        settle_conflicts(&mut report).unwrap();
+        assert_eq!(report.conflicts_waiting, 1);
         assert!(!archived(&here) && !archived(&there));
         assert!(edges::list_by_memory(&here.id).unwrap().is_empty());
         assert_eq!(settle(), (0, 0, 0));
@@ -1919,6 +1952,8 @@ mod tests {
         resolve_conflict(&disputed.id, &old_rule.id).unwrap();
         assert!(archived(&new_note));
 
+        crate::store::with_conn(|c| c.execute("UPDATE history SET timestamp = 0", []).map_err(|e| e.to_string()))
+            .unwrap();
         undo_last().unwrap();
         assert!(!archived(&new_note));
         undo_last().unwrap();
