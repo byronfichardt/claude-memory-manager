@@ -13,7 +13,9 @@ For procedural questions (how to deploy/test/commit/release X), cite the memory 
 
 ### Saving — call `memory_add` proactively
 
-Save immediately when you observe any of: a user correction, a stated preference or convention, a non-obvious project fact, a debugging gotcha and its fix, an architecture decision with its rationale, a project state change, or a workflow discovery. A typical session produces 3–10 memories. Self-check before commits and at session end.
+Save immediately when you observe any of: a user correction, a stated preference or convention, a non-obvious project fact, a debugging gotcha and its fix, an architecture decision with its rationale, or a workflow discovery. A typical session produces 3–10 memories. Self-check before commits and at session end.
+
+Don't save status snapshots: progress logs, "X is done/shipped/merged", handoff notes, what is left to do, or a ticket's current state. They go stale within days and the organizer archives them. Save the lasting lesson behind the work instead.
 
 Good memories are specific, terse, and self-contained. Prefer several small focused memories over one big one. Set `type` to `user` (about the human), `feedback` (rules/conventions), `project` (project-specific facts), or `reference` (external resources). Skip `topic` — it's auto-classified.
 

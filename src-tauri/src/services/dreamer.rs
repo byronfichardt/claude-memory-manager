@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Emitter};
 
 use crate::services::claude_api::ClaudeClient;
-use crate::store::{dreams, memories};
+use crate::store::{dreams, memories, snapshots};
 
 pub const PROGRESS_EVENT: &str = "dreamer:progress";
 
@@ -228,6 +228,7 @@ Look for:
 Do NOT propose:
 - Anything already in the memory store (titles listed below)
 - One-off events or temporary states
+- Status snapshots: progress logs, "X is done/shipped/merged", handoff notes, what is left to do, the current state of a ticket
 - Obvious or trivial facts
 - Anything vague or generic
 
@@ -310,7 +311,10 @@ async fn mine_new_memories(
         .map_err(|e| format!("parse mine response: {} — raw: {}", e, &response.text[..200.min(response.text.len())]))?;
 
     let now = dreams::now();
-    Ok(parsed.proposals.into_iter().map(|p| dreams::DreamProposal {
+    let parsed_proposals = parsed.proposals.into_iter().filter(|p| {
+        !matches!(snapshots::tombstone_for(&p.title, &p.description, &p.content), Ok(Some(_)))
+    });
+    Ok(parsed_proposals.map(|p| dreams::DreamProposal {
         id: uuid::Uuid::new_v4().to_string(),
         proposal_type: "new".to_string(),
         title: p.title,

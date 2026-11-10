@@ -5,6 +5,7 @@ pub mod history;
 pub mod memories;
 pub mod repo_edges;
 pub mod settings;
+pub mod snapshots;
 pub mod topics;
 
 #[cfg(test)]
@@ -194,6 +195,24 @@ pub fn init() -> Result<(), String> {
 
     POOL.set(pool).map_err(|_| "DB already initialized".to_string())?;
     Ok(())
+}
+
+/// One isolated on-disk store per test process, held exclusively by the
+/// caller. `memories.db` is created first so `db_path()` never moves the
+/// user's real store into the temp dir.
+#[cfg(test)]
+pub(crate) fn test_store() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("cmm-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Connection::open(dir.join("memories.db")).unwrap();
+        std::env::set_var("CLAUDE_MEMORY_DB_DIR", &dir);
+        init().expect("isolated store must be the first init in this process");
+        assert!(db_path().starts_with(&dir));
+    });
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 pub fn with_conn<F, R>(f: F) -> Result<R, String>

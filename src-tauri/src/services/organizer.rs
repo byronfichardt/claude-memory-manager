@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 use crate::services::claude_api::ClaudeClient;
-use crate::services::{dedup, ranking};
-use crate::store::{dreams, edges, history, memories, settings, topics};
+use crate::services::{dedup, ranking, snapshot_cleanup};
+use crate::store::{dreams, edges, history, memories, settings, snapshots, topics};
 
 pub const PROGRESS_EVENT: &str = "organizer:progress";
 
@@ -237,6 +237,8 @@ pub struct OrganizerReport {
     /// Contradictions waiting in Dreaming for the user after this pass.
     #[serde(default)]
     pub conflicts_waiting: usize,
+    #[serde(default)]
+    pub snapshots_archived: usize,
     pub errors: Vec<String>,
 }
 
@@ -409,6 +411,11 @@ pub async fn run_full_pass(handle: Option<AppHandle>, force: bool) -> Result<Org
         }
     }
 
+    match archive_stale_snapshots(h, &client, &mut report).await {
+        Ok(()) => {}
+        Err(e) => report.errors.push(format!("snapshots: {}", e)),
+    }
+
     // Phase 2: store-wide near-dup clusters (cross-topic), then the
     // per-topic pass for leftover same-topic paraphrases the clusterer
     // did not group.
@@ -454,6 +461,36 @@ pub async fn run_full_pass(handle: Option<AppHandle>, force: bool) -> Result<Org
     emit(h, "done", "Organize complete", 0, 0);
 
     Ok(report)
+}
+
+async fn archive_stale_snapshots(
+    handle: Option<&AppHandle>,
+    client: &ClaudeClient,
+    report: &mut OrganizerReport,
+) -> Result<(), String> {
+    let live: Vec<memories::Memory> = memories::list_all()?
+        .into_iter()
+        .filter(|m| m.archived_at.is_none())
+        .collect();
+    let mut verdicts = snapshots::verdicts()?;
+    let pending = snapshot_cleanup::needs_review(&live, &verdicts);
+
+    let total = pending.chunks(snapshot_cleanup::BATCH_SIZE).count();
+    for (i, chunk) in pending.chunks(snapshot_cleanup::BATCH_SIZE).enumerate() {
+        emit(handle, "snapshots", format!("Checking {} possible status snapshots", chunk.len()), i, total);
+        match snapshot_cleanup::classify_batch(client, chunk).await {
+            Ok(ids) => snapshot_cleanup::record_verdicts(chunk, &ids, &mut verdicts)?,
+            Err(e) => report.errors.push(format!("snapshot batch: {}", e)),
+        }
+    }
+
+    let superseded = edges::list_by_type("supersedes")?
+        .into_iter()
+        .map(|e| e.target_id)
+        .collect();
+    report.snapshots_archived =
+        snapshot_cleanup::archive_stale(&live, &verdicts, &superseded, chrono::Utc::now().timestamp())?;
+    Ok(())
 }
 
 /// Consolidate overlapping topics (Phase 3). Reads all topics with samples,
@@ -1056,6 +1093,12 @@ async fn dedup_batch(
     client: &ClaudeClient,
     batch: &[memories::Memory],
 ) -> Result<Vec<Merge>, String> {
+    let verdicts = snapshots::verdicts()?;
+    let batch = snapshot_cleanup::excluding_snapshots(batch, &verdicts);
+    if batch.len() < 2 {
+        return Ok(Vec::new());
+    }
+
     let mut prompt = String::new();
     prompt.push_str(
         "These memories look similar (they may be in different topics). Identify near-duplicates:\n\n",
@@ -1089,6 +1132,11 @@ fn apply_merge(merge: &Merge, topic: &str) -> Result<(), String> {
     }
     if source_memories.len() < 2 {
         return Err("merge requires at least 2 source memories".to_string());
+    }
+    for m in &source_memories {
+        if snapshots::is_snapshot(&m.id)? {
+            return Err(format!("merge refused: {} is a status snapshot", m.id));
+        }
     }
 
     // Snapshot originals for undo BEFORE any destructive op
@@ -1176,6 +1224,9 @@ fn undo_archive(snapshot: &serde_json::Value) -> Result<(), String> {
             edges::delete_between(kept, memory_id, "supersedes")?;
             edges::insert(kept, memory_id, "contradicts", 0.5, field("origin").unwrap_or("user_resolved"))?;
         }
+    }
+    if field("reason") == Some("snapshot") {
+        snapshots::set_verdict(memory_id, snapshots::KEPT)?;
     }
     if let Some(proposal_id) = field("dream_proposal_id") {
         if resolved_conflict {
@@ -1874,13 +1925,7 @@ mod tests {
 
     #[test]
     fn conflicts_settle_by_rule_and_only_disputes_reach_the_user() {
-        // An existing memories.db stops db_path() from moving the real store in.
-        let dir = std::env::temp_dir().join(format!("cmm-conflict-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        rusqlite::Connection::open(dir.join("memories.db")).unwrap();
-        std::env::set_var("CLAUDE_MEMORY_DB_DIR", &dir);
-        crate::store::init().expect("isolated store must be the first init in this process");
-        assert!(crate::store::db_path().starts_with(&dir));
+        let _store = crate::store::test_store();
 
         let new = |title: &str, memory_type: &str, project: Option<&str>, created_at: i64| {
             let m = memories::insert(memories::NewMemory {
@@ -1983,8 +2028,35 @@ mod tests {
         assert_eq!(dreams::pending_count().unwrap(), 2);
         assert_eq!(settle(), (0, 0, 0, 2));
         assert!(!archived(&old_note));
+    }
 
-        let _ = std::fs::remove_dir_all(&dir);
+    #[test]
+    fn merge_refuses_a_confirmed_snapshot_source() {
+        let _store = crate::store::test_store();
+        let add = |title: &str| {
+            memories::insert(memories::NewMemory {
+                title: title.to_string(),
+                description: String::new(),
+                content: format!("{title} body"),
+                memory_type: Some("project".to_string()),
+                topic: None,
+                source: None,
+                project: None,
+            })
+            .unwrap()
+        };
+        let snap = add("Numbat sync DONE and merged");
+        let lesson = add("Numbat sync retries three times");
+        snapshots::set_verdict(&snap.id, snapshots::SNAPSHOT).unwrap();
+
+        let merge = Merge {
+            source_ids: vec![snap.id.clone(), lesson.id.clone()],
+            merged_title: "Numbat sync".to_string(),
+            merged_description: String::new(),
+            merged_content: "Numbat sync retries three times; done and merged".to_string(),
+        };
+        assert!(apply_merge(&merge, "numbat").unwrap_err().contains("status snapshot"));
+        assert!(memories::get(&snap.id).unwrap().is_some());
+        assert!(memories::get(&lesson.id).unwrap().is_some());
     }
 }
-

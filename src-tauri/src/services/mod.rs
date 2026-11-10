@@ -15,3 +15,4 @@ pub mod portable;
 pub mod project;
 pub mod ranking;
 pub mod scanner;
+pub mod snapshot_cleanup;

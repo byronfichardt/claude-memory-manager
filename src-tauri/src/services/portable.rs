@@ -13,7 +13,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::store::{edges::MemoryEdge, memories::Memory, topics::Topic, with_conn};
+use crate::store::{edges::MemoryEdge, memories::Memory, snapshots, topics::Topic, with_conn};
 
 pub const BUNDLE_VERSION: u32 = 1;
 
@@ -187,6 +187,13 @@ pub fn import_bundle_in(
                 // Already present (by hash)? Record mapping, skip insert.
                 if let Some(existing_id) = find_id_by_hash(conn, &hash)? {
                     id_map.insert(mem.id.clone(), existing_id);
+                    report.memories_skipped += 1;
+                    continue;
+                }
+
+                if mode == ImportMode::Merge
+                    && snapshots::tombstone_for_with_conn(conn, &mem.title, &mem.description, &mem.content)?.is_some()
+                {
                     report.memories_skipped += 1;
                     continue;
                 }
@@ -432,6 +439,7 @@ mod tests {
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 access_count INTEGER NOT NULL DEFAULT 0,
+                archived_at INTEGER,
                 FOREIGN KEY(topic) REFERENCES topics(name) ON DELETE SET NULL
             );
 
@@ -519,6 +527,37 @@ mod tests {
         assert_eq!(count(&target, "memories"), 3);
         assert_eq!(count(&target, "topics"), 1);
         assert_eq!(count(&target, "memory_edges"), 1);
+    }
+
+    #[test]
+    fn merge_import_skips_reworded_archived_snapshot() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_schema(&conn);
+        conn.execute(
+            r#"INSERT INTO memories (id, title, description, content, content_hash, created_at, updated_at, archived_at)
+               VALUES ('snap', 'Wombat migration DONE', '', 'Wombat migration merged and deployed to staging today', 'h-snap', 1, 1, 2)"#,
+            [],
+        )
+        .unwrap();
+        snapshots::set_verdict_with_conn(&conn, "snap", snapshots::SNAPSHOT).unwrap();
+
+        let bundle = serde_json::json!({
+            "version": BUNDLE_VERSION,
+            "exported_at": 0,
+            "memory_count": 2,
+            "topics": [],
+            "edges": [],
+            "memories": [
+                {"id": "again", "title": "Wombat migration done", "description": "", "content": "Wombat migration merged and deployed to staging", "content_hash": null, "memory_type": "project", "topic": null, "source": null, "project": null, "created_at": 5, "updated_at": 5, "access_count": 0},
+                {"id": "fresh", "title": "Wombat API rate limit", "description": "", "content": "The wombat API allows 10 requests per second", "content_hash": null, "memory_type": "project", "topic": null, "source": null, "project": null, "created_at": 5, "updated_at": 5, "access_count": 0}
+            ]
+        });
+
+        let report = import_bundle_in(&conn, &bundle.to_string(), ImportMode::Merge).unwrap();
+        assert_eq!(report.memories_added, 1);
+        assert_eq!(report.memories_skipped, 1);
+        assert!(!id_exists(&conn, "again").unwrap());
+        assert!(id_exists(&conn, "fresh").unwrap());
     }
 
     #[test]

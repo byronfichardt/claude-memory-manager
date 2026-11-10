@@ -214,6 +214,7 @@ export interface OrganizerReport {
   conflicts_auto_resolved?: number;
   conflicts_dropped?: number;
   conflicts_waiting?: number;
+  snapshots_archived?: number;
   errors: string[];
 }
 

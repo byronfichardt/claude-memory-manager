@@ -51,7 +51,7 @@ pub struct NewMemory {
     pub project: Option<String>,
 }
 
-fn row_to_memory(row: &Row) -> rusqlite::Result<Memory> {
+pub(crate) fn row_to_memory(row: &Row) -> rusqlite::Result<Memory> {
     Ok(Memory {
         id: row.get("id")?,
         title: row.get("title")?,

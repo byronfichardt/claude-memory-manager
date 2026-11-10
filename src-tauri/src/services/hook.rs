@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 
 use crate::services::{dedup, perf, project, ranking};
-use crate::store::{self, edges, encountered, memories, repo_edges};
+use crate::store::{self, edges, encountered, memories, repo_edges, snapshots};
 
 const MAX_RESULTS: u32 = 5;
 const MAX_SNIPPET_CHARS: usize = 300;
@@ -105,23 +105,7 @@ pub fn run() -> Result<(), String> {
     // as a deterministic manual memory.
     if let Some(text_to_save) = extract_remember_directive(&event.prompt) {
         match save_user_memory(&conn, text_to_save, active_project.as_deref()) {
-            Ok((title, created)) => {
-                out.push_str("<memory-saved>\n");
-                if created {
-                    out.push_str(&format!(
-                        "✓ Memory saved automatically via the user's `remember:` directive.\nTitle: {}\n",
-                        title
-                    ));
-                } else {
-                    out.push_str(&format!(
-                        "✓ A very similar memory already exists — not saved again.\nTitle: {}\n",
-                        title
-                    ));
-                }
-                out.push_str("You do NOT need to call memory_add for this — it's already saved.\n");
-                out.push_str("Acknowledge the save briefly and proceed with any other part of the user's request.\n");
-                out.push_str("</memory-saved>\n\n");
-            }
+            Ok(outcome) => out.push_str(&render_remember(&outcome)),
             Err(e) => {
                 eprintln!("[hook] remember save failed: {}", e);
                 // Fall through to normal retrieval anyway
@@ -605,12 +589,15 @@ const CORRECTION_NUDGE: &str = "\
 The user's message reads as a correction or pushback. Before responding to the rest of it, call memory_add with type=feedback to capture: (1) the rule, (2) why it matters. Save first, reply second — the save is the point, the reply is the easy part.
 </memory-correction-detected>";
 
+const REMEMBER_ACK: &str = "You do NOT need to call memory_add for this — it's already saved.\nAcknowledge the save briefly and proceed with any other part of the user's request.\n</memory-saved>\n\n";
+
 const SAVE_CHECKLIST: &str = "\
 <memory-save-checklist>
 Before replying, scan this turn for memory-worthy signals:
 - user correction or stated preference/convention
 - non-obvious project fact, debugging gotcha + fix, or architecture decision + rationale
-- project state change (status, ownership, deadlines)
+- a lasting project decision (ownership, deadlines, chosen approach)
+Not memory-worthy: progress/status snapshots (\"X is done\", handoff notes, what's left to do).
 If any apply, call memory_add NOW — do not batch to end of session. Saves are cheap; reconstructing lost context is not.
 
 Repo relationship signals — call repo_link if you notice:
@@ -736,8 +723,32 @@ fn extract_remember_directive(prompt: &str) -> Option<String> {
     None
 }
 
+#[derive(Debug, PartialEq)]
+enum RememberOutcome {
+    Saved(String),
+    Duplicate(String),
+    Snapshot(String),
+}
+
+fn render_remember(outcome: &RememberOutcome) -> String {
+    match outcome {
+        RememberOutcome::Snapshot(title) => format!(
+            "<memory-not-saved>\n✗ Not saved: the user's `remember:` text matches a status snapshot that was archived as stale.\nArchived title: {}\nTell the user it was not saved because progress/status updates are not kept as memories. If there is a lasting lesson in it, offer to save that instead with memory_add.\n</memory-not-saved>\n\n",
+            title
+        ),
+        RememberOutcome::Saved(title) => format!(
+            "<memory-saved>\n✓ Memory saved automatically via the user's `remember:` directive.\nTitle: {}\n{}",
+            title, REMEMBER_ACK
+        ),
+        RememberOutcome::Duplicate(title) => format!(
+            "<memory-saved>\n✓ A very similar memory already exists — not saved again.\nTitle: {}\n{}",
+            title, REMEMBER_ACK
+        ),
+    }
+}
+
 /// Save a user-directed memory. Derives a title from the first sentence or
-/// first MAX_TITLE_LEN chars. Content is the full text. Returns the title.
+/// first MAX_TITLE_LEN chars. Content is the full text. Returns what happened.
 ///
 /// NOTE: `remember:` directives are currently classified as type=user, which is
 /// always global per scope rules. The `active_project` param is plumbed through
@@ -746,15 +757,18 @@ fn save_user_memory(
     conn: &Connection,
     text: String,
     active_project: Option<&Path>,
-) -> Result<(String, bool), String> {
+) -> Result<RememberOutcome, String> {
     let title = derive_title(&text);
     let description = String::new();
 
     let memory_type = Some("user".to_string());
     let project = project::resolve_memory_scope(memory_type.as_deref(), None, active_project);
 
+    if let Ok(Some(tombstone)) = snapshots::tombstone_for_with_conn(conn, &title, "", &text) {
+        return Ok(RememberOutcome::Snapshot(tombstone.title));
+    }
     if let Ok(Some(existing)) = dedup::existing_near_duplicate_with_conn(conn, &title, &text, project.as_deref()) {
-        return Ok((existing.title, false));
+        return Ok(RememberOutcome::Duplicate(existing.title));
     }
 
     let memory = memories::insert_with_conn(
@@ -770,7 +784,7 @@ fn save_user_memory(
         },
     )?;
 
-    Ok((memory.title, true))
+    Ok(RememberOutcome::Saved(memory.title))
 }
 
 fn derive_title(text: &str) -> String {
@@ -806,6 +820,38 @@ fn truncate_chars(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remember_refuses_an_archived_snapshot_and_says_so() {
+        let _store = store::test_store();
+        let snap = memories::insert(memories::NewMemory {
+            title: "Bilby importer rewrite DONE".to_string(),
+            description: String::new(),
+            content: "Bilby importer rewrite done, merged and waiting on QA sign-off".to_string(),
+            memory_type: Some("project".to_string()),
+            topic: None,
+            source: None,
+            project: None,
+        })
+        .unwrap();
+        memories::archive(&snap.id).unwrap();
+        snapshots::set_verdict(&snap.id, snapshots::SNAPSHOT).unwrap();
+
+        let outcome = store::with_conn(|c| {
+            save_user_memory(c, "Bilby importer rewrite done, merged and waiting on QA sign-off".to_string(), None)
+        })
+        .unwrap();
+        assert_eq!(outcome, RememberOutcome::Snapshot(snap.title));
+        let rendered = render_remember(&outcome);
+        assert!(rendered.starts_with("<memory-not-saved>"));
+        assert!(!rendered.contains("already saved"));
+
+        let outcome = store::with_conn(|c| {
+            save_user_memory(c, "Bilby importer needs the legacy CSV header row skipped".to_string(), None)
+        })
+        .unwrap();
+        assert!(matches!(outcome, RememberOutcome::Saved(_)));
+    }
 
     #[test]
     fn test_extract_remember_directive() {

@@ -6,7 +6,7 @@ use crate::services::installer::{
     SETTING_CUSTOM_DB_DIR, SETTING_HOOK_ENABLED,
 };
 use crate::services::{bootstrap, claude_api, dreamer, embeddings, organizer, portable};
-use crate::store::{dreams, edges, history, memories, repo_edges, settings, topics};
+use crate::store::{dreams, edges, history, memories, repo_edges, settings, snapshots, topics};
 
 /// Run a blocking closure on tauri's blocking thread pool. Use for any
 /// command that touches the SQLite pool or other blocking I/O — keeps the
@@ -643,6 +643,9 @@ pub async fn apply_dream_proposal(id: String) -> Result<(), String> {
 
         match proposal.proposal_type.as_str() {
             "new" => {
+                if let Some(t) = snapshots::tombstone_for(&proposal.title, &proposal.description, &proposal.content)? {
+                    return Err(format!("This matches an archived status snapshot: {}", t.title));
+                }
                 memories::insert(memories::NewMemory {
                     title: proposal.title,
                     description: proposal.description,

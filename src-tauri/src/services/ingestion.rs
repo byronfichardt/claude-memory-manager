@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::services::{bootstrap, scanner};
 use crate::store::memories::{self, NewMemory};
+use crate::store::snapshots;
 
 #[derive(Debug, serde::Serialize)]
 pub struct IngestionReport {
@@ -54,6 +55,11 @@ pub fn ingest_existing_files() -> Result<IngestionReport, String> {
                         source: Some(format!("{}: {}", source_label, file.relative_path)),
                         project: None, // imported memories stay global; user classifies later
                     };
+
+                    if let Ok(Some(_)) = snapshots::tombstone_for(&new.title, &new.description, &new.content) {
+                        report.memories_skipped += 1;
+                        continue;
+                    }
 
                     match memories::insert(new) {
                         Ok(m) => {
