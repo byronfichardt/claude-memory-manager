@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 use crate::services::claude_api::ClaudeClient;
-use crate::services::{dedup, snapshot_cleanup};
+use crate::services::{dedup, ranking, snapshot_cleanup};
 use crate::store::{dreams, edges, history, memories, settings, snapshots, topics};
 
 pub const PROGRESS_EVENT: &str = "organizer:progress";
@@ -228,6 +228,15 @@ pub struct OrganizerReport {
     /// Contradicting pairs newly queued for the user to resolve.
     #[serde(default)]
     pub conflicts_raised: usize,
+    /// Contradicting pairs settled by rule: the newer memory kept.
+    #[serde(default)]
+    pub conflicts_auto_resolved: usize,
+    /// Contradictions dropped because the memories belong to different projects.
+    #[serde(default)]
+    pub conflicts_dropped: usize,
+    /// Contradictions waiting in Dreaming for the user after this pass.
+    #[serde(default)]
+    pub conflicts_waiting: usize,
     #[serde(default)]
     pub snapshots_archived: usize,
     pub errors: Vec<String>,
@@ -436,10 +445,7 @@ pub async fn run_full_pass(handle: Option<AppHandle>, force: bool) -> Result<Org
         Err(e) => report.errors.push(format!("split: {}", e)),
     }
 
-    match raise_conflict_proposals() {
-        Ok(n) => report.conflicts_raised = n,
-        Err(e) => report.errors.push(format!("conflicts: {}", e)),
-    }
+    settle_and_count_conflicts(&mut report);
 
     // Phase 5: prune the low-signal `relates-to` graph. Co-access wiring adds
     // edges on every prompt, so this bounded sweep every pass stops the graph
@@ -1217,17 +1223,22 @@ fn undo_archive(snapshot: &serde_json::Value) -> Result<(), String> {
     let memory_id = field("memory_id").ok_or("archive snapshot has no memory_id")?;
     memories::unarchive(memory_id)?;
 
-    if field("reason") == Some("conflict_resolved") {
+    let resolved_conflict = field("reason") == Some("conflict_resolved");
+    if resolved_conflict {
         if let Some(kept) = field("superseded_by") {
             edges::delete_between(kept, memory_id, "supersedes")?;
-            edges::insert(kept, memory_id, "contradicts", 0.5, "user_resolved")?;
+            edges::insert(kept, memory_id, "contradicts", 0.5, field("origin").unwrap_or("user_resolved"))?;
         }
     }
     if field("reason") == Some("snapshot") {
         snapshots::set_verdict(memory_id, snapshots::KEPT)?;
     }
     if let Some(proposal_id) = field("dream_proposal_id") {
-        dreams::set_status(proposal_id, "pending")?;
+        if resolved_conflict {
+            dreams::reopen_conflict(proposal_id)?;
+        } else {
+            dreams::set_status(proposal_id, "pending")?;
+        }
     }
     Ok(())
 }
@@ -1596,43 +1607,105 @@ fn apply_discovered_edges(
     Ok(())
 }
 
-/// Queue every live `contradicts` pair that has never been raised so the
-/// user picks a winner; recall keeps warning until they do.
-pub fn raise_conflict_proposals() -> Result<usize, String> {
-    let mut raised = 0;
+/// Settles what it can, then counts every contradiction left for the user, even
+/// when settling stopped partway.
+fn settle_and_count_conflicts(report: &mut OrganizerReport) {
+    if let Err(e) = settle_conflicts(report) {
+        report.errors.push(format!("conflicts: {}", e));
+    }
+    if let Ok(n) = dreams::pending_conflict_count() {
+        report.conflicts_waiting = n as usize;
+    }
+}
+
+/// Settle every live `contradicts` pair by rule where one decides it, and
+/// queue only the rest for the user. Pairs the user already answered, and
+/// conflicts reopened by an undo, are left alone.
+fn settle_conflicts(report: &mut OrganizerReport) -> Result<(), String> {
     for edge in edges::list_by_type("contradicts")? {
-        if dreams::conflict_exists(&edge.source_id, &edge.target_id)? {
-            continue;
-        }
         let (a, b) = match (memories::get(&edge.source_id)?, memories::get(&edge.target_id)?) {
             (Some(a), Some(b)) if a.archived_at.is_none() && b.archived_at.is_none() => (a, b),
             _ => continue,
         };
-        dreams::save_proposal(&dreams::DreamProposal {
-            id: uuid::Uuid::new_v4().to_string(),
-            proposal_type: "conflict".to_string(),
-            title: format!("{} ⟷ {}", a.title, b.title),
-            content: String::new(),
-            description: String::new(),
-            memory_type: a.memory_type.clone().unwrap_or_else(|| "project".to_string()),
-            reasoning: "The organizer found these two memories contradict each other.".to_string(),
-            target_memory_id: Some(b.id),
-            related_memory_id: Some(a.id),
-            status: "pending".to_string(),
-            created_at: dreams::now(),
-        })?;
-        raised += 1;
+        let existing = dreams::find_conflict(&a.id, &b.id)?;
+        let open = match &existing {
+            None => None,
+            Some(p) if p.status == "pending" && p.description != dreams::CONFLICT_REOPENED => Some(p.id.clone()),
+            Some(_) => continue,
+        };
+
+        let verdict = ranking::conflict_verdict(
+            (a.memory_type.as_deref(), a.project.as_deref(), a.created_at),
+            (b.memory_type.as_deref(), b.project.as_deref(), b.created_at),
+        );
+        match verdict {
+            ranking::ConflictVerdict::Unrelated => {
+                edges::delete_between(&a.id, &b.id, "contradicts")?;
+                if let Some(id) = open {
+                    dreams::set_status(&id, "dismissed")?;
+                }
+                report.conflicts_dropped += 1;
+            }
+            ranking::ConflictVerdict::Keep(i) => {
+                let id = match open {
+                    Some(id) => id,
+                    None => save_conflict_proposal(&a, &b, "Settled by rule: the newer memory was kept.")?,
+                };
+                let keep = if i == 0 { &a.id } else { &b.id };
+                resolve_conflict_as(&id, keep, "auto_resolved")?;
+                report.conflicts_auto_resolved += 1;
+            }
+            ranking::ConflictVerdict::Ask => {
+                if open.is_none() {
+                    save_conflict_proposal(
+                        &a,
+                        &b,
+                        "A newer project note disputes an older standing rule, so this needs your call.",
+                    )?;
+                    report.conflicts_raised += 1;
+                }
+            }
+        }
     }
-    Ok(raised)
+    Ok(())
+}
+
+fn save_conflict_proposal(
+    a: &memories::Memory,
+    b: &memories::Memory,
+    reasoning: &str,
+) -> Result<String, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    dreams::save_proposal(&dreams::DreamProposal {
+        id: id.clone(),
+        proposal_type: "conflict".to_string(),
+        title: format!("{} ⟷ {}", a.title, b.title),
+        content: String::new(),
+        description: String::new(),
+        memory_type: a.memory_type.clone().unwrap_or_else(|| "project".to_string()),
+        reasoning: reasoning.to_string(),
+        target_memory_id: Some(b.id.clone()),
+        related_memory_id: Some(a.id.clone()),
+        status: "pending".to_string(),
+        created_at: dreams::now(),
+    })?;
+    Ok(id)
 }
 
 /// Keep `keep_id` from a conflict proposal: the other side is archived and
 /// linked as superseded, and the `contradicts` edge between them is dropped.
 pub fn resolve_conflict(proposal_id: &str, keep_id: &str) -> Result<(), String> {
+    resolve_conflict_as(proposal_id, keep_id, "user_resolved")
+}
+
+fn resolve_conflict_as(proposal_id: &str, keep_id: &str, origin: &str) -> Result<(), String> {
     let proposal = dreams::get(proposal_id)?
         .ok_or_else(|| format!("dream proposal not found: {}", proposal_id))?;
     if proposal.proposal_type != "conflict" {
         return Err(format!("proposal {} is not a conflict", proposal_id));
+    }
+    if proposal.status != "pending" {
+        return Err("this contradiction has already been settled".to_string());
     }
     let drop_id = match (proposal.target_memory_id, proposal.related_memory_id) {
         (Some(a), Some(b)) if a == keep_id => b,
@@ -1644,7 +1717,7 @@ pub fn resolve_conflict(proposal_id: &str, keep_id: &str) -> Result<(), String> 
         _ => return Err("the memory you chose to keep is no longer active".to_string()),
     }
 
-    edges::insert(keep_id, &drop_id, "supersedes", 0.95, "user_resolved")?;
+    edges::insert(keep_id, &drop_id, "supersedes", 0.95, origin)?;
     edges::delete_between(keep_id, &drop_id, "contradicts")?;
     memories::archive(&drop_id)?;
     history::record(
@@ -1655,6 +1728,7 @@ pub fn resolve_conflict(proposal_id: &str, keep_id: &str) -> Result<(), String> 
             "memory_id": drop_id,
             "superseded_by": keep_id,
             "dream_proposal_id": proposal_id,
+            "origin": origin,
         }),
     )?;
     dreams::set_status(proposal_id, "applied")
@@ -1855,44 +1929,110 @@ mod tests {
     }
 
     #[test]
-    fn conflict_is_raised_once_resolved_by_archiving_and_undoable() {
+    fn conflicts_settle_by_rule_and_only_disputes_reach_the_user() {
         let _store = crate::store::test_store();
 
-        let new = |title: &str| {
-            memories::insert(memories::NewMemory {
+        let new = |title: &str, memory_type: &str, project: Option<&str>, created_at: i64| {
+            let m = memories::insert(memories::NewMemory {
                 title: title.to_string(),
                 description: String::new(),
                 content: format!("{title} body"),
-                memory_type: Some("feedback".to_string()),
+                memory_type: Some(memory_type.to_string()),
                 topic: None,
                 source: None,
-                project: None,
+                project: project.map(str::to_string),
             })
-            .unwrap()
+            .unwrap();
+            crate::store::with_conn(|c| {
+                c.execute("UPDATE memories SET created_at = ?1 WHERE id = ?2", rusqlite::params![created_at, m.id])
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap();
+            m
         };
-        let keep = new("Deploy with kamal");
-        let stale = new("Deploy with kubernetes");
-        edges::insert(&keep.id, &stale.id, "contradicts", 0.5, "ai_discovered").unwrap();
+        let contradict = |a: &memories::Memory, b: &memories::Memory| {
+            edges::insert(&a.id, &b.id, "contradicts", 0.5, "ai_discovered").unwrap();
+        };
+        let archived = |m: &memories::Memory| memories::get(&m.id).unwrap().unwrap().archived_at.is_some();
+        let settle = || {
+            let mut report = OrganizerReport::default();
+            settle_and_count_conflicts(&mut report);
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+            (
+                report.conflicts_auto_resolved,
+                report.conflicts_dropped,
+                report.conflicts_raised,
+                report.conflicts_waiting,
+            )
+        };
+        let edge_types = |m: &memories::Memory| -> Vec<String> {
+            edges::list_by_memory(&m.id).unwrap().into_iter().map(|e| e.edge_type).collect()
+        };
 
-        assert_eq!(raise_conflict_proposals().unwrap(), 1);
-        assert_eq!(raise_conflict_proposals().unwrap(), 0);
+        let status_of = |a: &memories::Memory, b: &memories::Memory| {
+            dreams::find_conflict(&a.id, &b.id).unwrap().unwrap().status
+        };
+
+        let backlog_old = new("Cache for an hour", "project", Some("/p/a"), 100);
+        let backlog_new = new("Cache for a day", "project", Some("/p/a"), 200);
+        contradict(&backlog_old, &backlog_new);
+        save_conflict_proposal(&backlog_old, &backlog_new, "raised by an older version").unwrap();
+
+        let kept_a = new("Tabs", "project", Some("/p/a"), 100);
+        let kept_b = new("Spaces", "project", Some("/p/a"), 200);
+        contradict(&kept_a, &kept_b);
+        let kept_id = save_conflict_proposal(&kept_a, &kept_b, "raised by an older version").unwrap();
+        dreams::set_status(&kept_id, "dismissed").unwrap();
+
+        let card_a = new("Port 8080", "project", Some("/p/a"), 100);
+        let card_b = new("Port 3000", "project", Some("/p/c"), 200);
+        contradict(&card_a, &card_b);
+        save_conflict_proposal(&card_a, &card_b, "raised by an older version").unwrap();
+
+        let old_note = new("Deploy with kubernetes", "project", Some("/p/a"), 100);
+        let new_rule = new("Deploy with kamal", "feedback", None, 200);
+        contradict(&old_note, &new_rule);
+
+        let here = new("Use pnpm", "project", Some("/p/a"), 100);
+        let there = new("Use npm", "project", Some("/p/b"), 200);
+        contradict(&here, &there);
+
+        let old_rule = new("Never write to prod", "feedback", None, 100);
+        let new_note = new("Write to prod for this fix", "project", Some("/p/a"), 200);
+        contradict(&old_rule, &new_note);
+
+        assert_eq!(settle(), (2, 2, 1, 1));
+        assert!(archived(&backlog_old) && !archived(&backlog_new));
+        assert_eq!(status_of(&backlog_old, &backlog_new), "applied");
+        assert!(!archived(&kept_a) && !archived(&kept_b));
+        assert_eq!(status_of(&kept_a, &kept_b), "dismissed");
+        assert_eq!(status_of(&card_a, &card_b), "dismissed");
+        assert!(edges::list_by_memory(&card_a.id).unwrap().is_empty());
+        assert!(archived(&old_note) && !archived(&new_rule));
+        assert_eq!(edge_types(&old_note), vec!["supersedes"]);
+        assert!(!archived(&here) && !archived(&there));
+        assert!(edges::list_by_memory(&here.id).unwrap().is_empty());
+        assert_eq!(settle(), (0, 0, 0, 1));
+
         dreams::save_proposals(&[]).unwrap();
-        let proposal = dreams::list_pending().unwrap().pop().expect("dream run kept the conflict");
+        let disputed = dreams::list_pending().unwrap().pop().expect("dream run kept the dispute");
+        assert!(resolve_conflict(&disputed.id, "not-a-side").is_err());
+        resolve_conflict(&disputed.id, &old_rule.id).unwrap();
+        assert!(archived(&new_note));
+        assert_eq!(edge_types(&new_note), vec!["supersedes"]);
+        assert!(resolve_conflict(&disputed.id, &old_rule.id).is_err());
 
-        assert!(resolve_conflict(&proposal.id, "not-a-side").is_err());
-        resolve_conflict(&proposal.id, &keep.id).unwrap();
-
-        assert!(memories::get(&stale.id).unwrap().unwrap().archived_at.is_some());
-        assert!(memories::get(&keep.id).unwrap().unwrap().archived_at.is_none());
-        let types: Vec<String> = edges::list_by_memory(&keep.id).unwrap().into_iter().map(|e| e.edge_type).collect();
-        assert_eq!(types, vec!["supersedes".to_string()]);
-        assert_eq!(dreams::pending_count().unwrap(), 0);
-
+        crate::store::with_conn(|c| c.execute("UPDATE history SET timestamp = 0", []).map_err(|e| e.to_string()))
+            .unwrap();
         undo_last().unwrap();
-        assert!(memories::get(&stale.id).unwrap().unwrap().archived_at.is_none());
-        let types: Vec<String> = edges::list_by_memory(&keep.id).unwrap().into_iter().map(|e| e.edge_type).collect();
-        assert_eq!(types, vec!["contradicts".to_string()]);
-        assert_eq!(dreams::pending_count().unwrap(), 1);
+        assert!(!archived(&new_note));
+        assert_eq!(edge_types(&new_note), vec!["contradicts"]);
+        undo_last().unwrap();
+        assert!(!archived(&old_note));
+        assert_eq!(edge_types(&old_note), vec!["contradicts"]);
+        assert_eq!(dreams::pending_count().unwrap(), 2);
+        assert_eq!(settle(), (0, 0, 0, 2));
+        assert!(!archived(&old_note));
     }
 }
 
