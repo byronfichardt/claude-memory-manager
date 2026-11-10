@@ -5,7 +5,8 @@
 
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use serde::Serialize;
+use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 use crate::services::bootstrap::list_claude_config_dirs;
@@ -49,32 +50,30 @@ pub fn resolve_config_dir() -> Option<PathBuf> {
         .map(|(_, path)| path.clone())
 }
 
+fn is_default_config_dir(dir: &Path) -> bool {
+    dirs::home_dir().is_some_and(|h| h.join(".claude") == dir)
+}
+
 /// Give the spawned `claude` CLI the environment it needs to authenticate.
 ///
 /// When this app is launched from Finder, launchd hands it `HOME`, `USER` and a
-/// bare `PATH` — but never the exports from the user's shell profile. Claude
-/// Code's credential lookup needs more than that, and each missing piece fails
-/// differently:
+/// bare `PATH` — but never the exports from the user's shell profile. Without
+/// `USER` the keychain lookup fails with "Not logged in · Please run /login".
 ///
-///   * no `USER`              -> "Not logged in · Please run /login"
-///   * no `CLAUDE_CONFIG_DIR` -> "OAuth session expired and could not be refreshed"
-///
-/// Both must be set or every organizer phase that shells out to the CLI fails,
-/// while the pure-SQL phases (edge prune) quietly succeed — which reads as
-/// "organize ran but classified nothing".
-///
-/// This previously worked only by accident: the app happened to be launched from
-/// a terminal, so it inherited these from the shell. Relaunching it from Finder
-/// broke classification with no visible error.
-fn apply_cli_env(cmd: &mut Command, config_dir: Option<&PathBuf>) {
+/// `CLAUDE_CONFIG_DIR` is passed only when `config_env` is set: Claude Code
+/// names its keychain entry after that variable, so a default-profile login made
+/// without it is invisible to a CLI that has it, and vice versa. See
+/// [`ClaudeClient::new`] for how the right choice is found.
+fn apply_cli_env(cmd: &mut Command, config_env: Option<&PathBuf>) {
     let home = dirs::home_dir();
 
     if let Some(ref h) = home {
         cmd.env("HOME", h);
     }
-    if let Some(dir) = config_dir {
-        cmd.env("CLAUDE_CONFIG_DIR", dir);
-    }
+    match config_env {
+        Some(dir) => cmd.env("CLAUDE_CONFIG_DIR", dir),
+        None => cmd.env_remove("CLAUDE_CONFIG_DIR"),
+    };
 
     // Keychain lookup fails outright without a username. Fall back to the home
     // directory's name, which matches the account name on macOS.
@@ -113,29 +112,140 @@ fn apply_cli_env(cmd: &mut Command, config_dir: Option<&PathBuf>) {
     cmd.env("PATH", path);
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AuthStatus {
+    pub logged_in: bool,
+    pub config_dir: String,
+    pub email: Option<String>,
+    pub org_name: Option<String>,
+    pub auth_method: Option<String>,
+    pub error: Option<String>,
+}
+
+async fn probe_auth(binary: &str, config_env: Option<&PathBuf>) -> Result<AuthStatus, String> {
+    let mut cmd = Command::new(binary);
+    cmd.args(["auth", "status", "--json"]);
+    apply_cli_env(&mut cmd, config_env);
+    cmd.stdin(std::process::Stdio::null());
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Claude Code CLI not found at {}: {}", binary, e))?;
+
+    // Exits non-zero when signed out, but still prints the JSON status.
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        format!("claude auth status gave no status: {}", stderr.trim())
+    })?;
+    let field = |key: &str| json.get(key).and_then(|v| v.as_str()).map(String::from);
+
+    Ok(AuthStatus {
+        logged_in: json.get("loggedIn").and_then(|v| v.as_bool()).unwrap_or(false),
+        config_dir: field("configDirectory").unwrap_or_default(),
+        email: field("email"),
+        org_name: field("orgName"),
+        auth_method: field("authMethod"),
+        error: None,
+    })
+}
+
 pub struct ClaudeClient {
     binary: String,
     model: Option<String>,
     config_dir: Option<PathBuf>,
+    config_env: Option<PathBuf>,
+    auth: AuthStatus,
 }
 
 pub struct AnalyzeResponse {
     pub text: String,
 }
 
-impl Default for ClaudeClient {
-    fn default() -> Self {
-        Self::new(None)
-    }
-}
-
 impl ClaudeClient {
-    pub fn new(model: Option<String>) -> Self {
-        Self {
-            binary: resolve_claude_binary(),
-            model,
-            config_dir: resolve_config_dir(),
+    /// Resolves the profile, then whether the CLI must be told about it via
+    /// `CLAUDE_CONFIG_DIR` to find its login. A non-default profile always needs
+    /// it. The default `~/.claude` may have been signed into either way, so both
+    /// are tried and the one that is logged in wins.
+    pub async fn new(model: Option<String>) -> Self {
+        let binary = resolve_claude_binary();
+        let config_dir = resolve_config_dir();
+
+        let mut candidates = vec![config_dir.clone()];
+        if config_dir.as_deref().is_none_or(is_default_config_dir) {
+            candidates.push(None);
         }
+
+        let mut first: Option<(Option<PathBuf>, AuthStatus)> = None;
+        for config_env in candidates {
+            let auth = probe_auth(&binary, config_env.as_ref())
+                .await
+                .unwrap_or_else(|e| AuthStatus { error: Some(e), ..Default::default() });
+            if auth.logged_in {
+                first = Some((config_env, auth));
+                break;
+            }
+            first.get_or_insert((config_env, auth));
+        }
+        let (config_env, mut auth) = first.unwrap_or_default();
+        if auth.config_dir.is_empty() {
+            auth.config_dir = config_dir
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+        }
+
+        Self { binary, model, config_dir, config_env, auth }
+    }
+
+    pub fn auth_status(&self) -> &AuthStatus {
+        &self.auth
+    }
+
+    pub fn ensure_logged_in(&self) -> Result<(), String> {
+        if let Some(ref e) = self.auth.error {
+            return Err(e.clone());
+        }
+        if !self.auth.logged_in {
+            return Err(format!(
+                "Not signed in to Claude Code for {}. Open Settings → Organizer account and click Sign in.",
+                self.auth.config_dir
+            ));
+        }
+        Ok(())
+    }
+
+    /// Opens Terminal running `claude auth login` for the organizer's profile, so
+    /// the user never has to type a command. The OAuth flow is interactive, so it
+    /// can't run headless inside the app.
+    pub fn open_login(&self) -> Result<(), String> {
+        let quote = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
+        let env_line = match self.config_dir.as_deref() {
+            Some(dir) if !is_default_config_dir(dir) => {
+                format!("export CLAUDE_CONFIG_DIR={}\n", quote(&dir.to_string_lossy()))
+            }
+            _ => "unset CLAUDE_CONFIG_DIR\n".to_string(),
+        };
+        let script = format!(
+            "#!/bin/zsh\n{}{} auth login\necho\necho 'Done — you can close this window and return to Claude Memory Manager.'\n",
+            env_line,
+            quote(&self.binary)
+        );
+
+        let path = std::env::temp_dir().join("claude-memory-manager-login.command");
+        std::fs::write(&path, script).map_err(|e| format!("write login script: {}", e))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| format!("make login script executable: {}", e))?;
+        }
+
+        std::process::Command::new("open")
+            .arg(&path)
+            .status()
+            .map_err(|e| format!("open Terminal: {}", e))
+            .and_then(|s| if s.success() { Ok(()) } else { Err("open Terminal failed".into()) })
     }
 
     /// Send a prompt to Claude via the CLI and return the text response.
@@ -175,7 +285,7 @@ impl ClaudeClient {
             cmd.arg("--model").arg(model);
         }
 
-        apply_cli_env(&mut cmd, self.config_dir.as_ref());
+        apply_cli_env(&mut cmd, self.config_env.as_ref());
         // The CLI waits ~3s for stdin before giving up; close it so each call
         // doesn't pay that penalty.
         cmd.stdin(std::process::Stdio::null());
@@ -206,22 +316,5 @@ impl ClaudeClient {
         Ok(AnalyzeResponse {
             text: text.trim().to_string(),
         })
-    }
-
-    pub async fn check_available(&self) -> Result<(), String> {
-        let mut cmd = Command::new(&self.binary);
-        cmd.arg("--version");
-        apply_cli_env(&mut cmd, self.config_dir.as_ref());
-        cmd.stdin(std::process::Stdio::null());
-
-        let output = cmd
-            .output()
-            .await
-            .map_err(|e| format!("Claude Code CLI not found: {}", e))?;
-
-        if !output.status.success() {
-            return Err("claude --version failed".to_string());
-        }
-        Ok(())
     }
 }

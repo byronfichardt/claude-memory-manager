@@ -361,17 +361,12 @@ pub async fn run_full_pass(handle: Option<AppHandle>, force: bool) -> Result<Org
 
     let h = handle.as_ref();
     let mut report = OrganizerReport::default();
-    let client = ClaudeClient::new(None);
+    let client = ClaudeClient::new(None).await;
 
     // Fail loudly and early if the CLI can't authenticate. Otherwise every
     // Claude-backed phase fails one by one while the SQL-only phases succeed,
     // which looks like "organize ran but did nothing".
-    if let Err(e) = client.check_available().await {
-        return Err(format!(
-            "Claude CLI unavailable — organize cannot classify: {}",
-            e
-        ));
-    }
+    client.ensure_logged_in()?;
 
     let last_ts: i64 = settings::get(SETTING_LAST_ORGANIZE_TS, "0")
         .unwrap_or_else(|_| "0".to_string())

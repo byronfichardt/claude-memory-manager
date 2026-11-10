@@ -241,7 +241,8 @@ pub async fn run_organize_pass(app: tauri::AppHandle, force: Option<bool>) -> Re
 #[tauri::command]
 pub async fn run_consolidate_topics() -> Result<organizer::OrganizerReport, String> {
     let mut report = organizer::OrganizerReport::default();
-    let client = crate::services::claude_api::ClaudeClient::new(None);
+    let client = crate::services::claude_api::ClaudeClient::new(None).await;
+    client.ensure_logged_in()?;
     organizer::consolidate_topics(&client, &mut report).await?;
     Ok(report)
 }
@@ -312,6 +313,16 @@ pub async fn get_organizer_config_dir() -> Result<OrganizerConfigDir, String> {
         Ok(OrganizerConfigDir { configured, effective })
     })
     .await
+}
+
+#[tauri::command]
+pub async fn get_organizer_auth_status() -> claude_api::AuthStatus {
+    claude_api::ClaudeClient::new(None).await.auth_status().clone()
+}
+
+#[tauri::command]
+pub async fn open_organizer_login() -> Result<(), String> {
+    claude_api::ClaudeClient::new(None).await.open_login()
 }
 
 /// Pass an empty path to return to automatic resolution.

@@ -382,7 +382,8 @@ async fn detect_stale_memories(
 // ── Public API ────────────────────────────────────────────────────────────────
 
 pub async fn run_dream_pass(handle: Option<AppHandle>) -> Result<DreamReport, String> {
-    let client = ClaudeClient::default();
+    let client = ClaudeClient::new(None).await;
+    client.ensure_logged_in()?;
     let mut report = DreamReport {
         new_proposals: 0,
         stale_flags: 0,

@@ -51,6 +51,8 @@ pub fn run() {
             commands::autopilot::set_split_threshold,
             commands::autopilot::get_organizer_config_dir,
             commands::autopilot::set_organizer_config_dir,
+            commands::autopilot::get_organizer_auth_status,
+            commands::autopilot::open_organizer_login,
             commands::autopilot::get_custom_db_dir,
             commands::autopilot::set_custom_db_dir,
             commands::autopilot::get_hook_status,

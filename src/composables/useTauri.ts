@@ -23,6 +23,7 @@ import type {
   DreamProposal,
   DreamReport,
   OrganizerConfigDir,
+  AuthStatus,
 } from "@/types";
 
 export function useTauri() {
@@ -102,6 +103,9 @@ export function useTauri() {
       invoke<OrganizerConfigDir>("get_organizer_config_dir"),
     setOrganizerConfigDir: (path: string) =>
       invoke<void>("set_organizer_config_dir", { path }),
+    getOrganizerAuthStatus: () =>
+      invoke<AuthStatus>("get_organizer_auth_status"),
+    openOrganizerLogin: () => invoke<void>("open_organizer_login"),
 
     // Uninstall
     uninstallEverything: () => invoke<UninstallReport>("uninstall_everything"),
