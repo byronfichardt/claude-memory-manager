@@ -463,8 +463,6 @@ pub async fn run_full_pass(handle: Option<AppHandle>, force: bool) -> Result<Org
     Ok(report)
 }
 
-/// Ask Claude to confirm pre-filtered status snapshots, then archive the
-/// confirmed ones that are older than the cutoff or already superseded.
 async fn archive_stale_snapshots(
     handle: Option<&AppHandle>,
     client: &ClaudeClient,
@@ -1095,11 +1093,8 @@ async fn dedup_batch(
     client: &ClaudeClient,
     batch: &[memories::Memory],
 ) -> Result<Vec<Merge>, String> {
-    let snapshot_verdicts = snapshots::verdicts()?;
-    let batch: Vec<&memories::Memory> = batch
-        .iter()
-        .filter(|m| snapshot_verdicts.get(&m.id).map(String::as_str) != Some(snapshots::SNAPSHOT))
-        .collect();
+    let verdicts = snapshots::verdicts()?;
+    let batch = snapshot_cleanup::excluding_snapshots(batch, &verdicts);
     if batch.len() < 2 {
         return Ok(Vec::new());
     }
@@ -2034,5 +2029,34 @@ mod tests {
         assert_eq!(settle(), (0, 0, 0, 2));
         assert!(!archived(&old_note));
     }
-}
 
+    #[test]
+    fn merge_refuses_a_confirmed_snapshot_source() {
+        let _store = crate::store::test_store();
+        let add = |title: &str| {
+            memories::insert(memories::NewMemory {
+                title: title.to_string(),
+                description: String::new(),
+                content: format!("{title} body"),
+                memory_type: Some("project".to_string()),
+                topic: None,
+                source: None,
+                project: None,
+            })
+            .unwrap()
+        };
+        let snap = add("Numbat sync DONE and merged");
+        let lesson = add("Numbat sync retries three times");
+        snapshots::set_verdict(&snap.id, snapshots::SNAPSHOT).unwrap();
+
+        let merge = Merge {
+            source_ids: vec![snap.id.clone(), lesson.id.clone()],
+            merged_title: "Numbat sync".to_string(),
+            merged_description: String::new(),
+            merged_content: "Numbat sync retries three times; done and merged".to_string(),
+        };
+        assert!(apply_merge(&merge, "numbat").unwrap_err().contains("status snapshot"));
+        assert!(memories::get(&snap.id).unwrap().is_some());
+        assert!(memories::get(&lesson.id).unwrap().is_some());
+    }
+}

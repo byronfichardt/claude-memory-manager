@@ -1,6 +1,3 @@
-//! Finds point-in-time status snapshots ("TAF-123 DONE", "state of X on
-//! 2026-08-25") among project memories and archives them once stale.
-
 use std::collections::{HashMap, HashSet};
 
 use serde::Deserialize;
@@ -79,12 +76,18 @@ pub fn is_stale(m: &Memory, now: i64, superseded: bool) -> bool {
     superseded || now - m.created_at >= MAX_AGE_SECS
 }
 
-/// Live memories that pass the cheap pre-filter and have no verdict yet.
 pub fn needs_review<'a>(live: &'a [Memory], verdicts: &HashMap<String, String>) -> Vec<&'a Memory> {
     live.iter()
         .filter(|m| m.archived_at.is_none())
         .filter(|m| !verdicts.contains_key(&m.id))
         .filter(|m| looks_like_snapshot(m))
+        .collect()
+}
+
+pub fn excluding_snapshots<'a>(batch: &'a [Memory], verdicts: &HashMap<String, String>) -> Vec<&'a Memory> {
+    batch
+        .iter()
+        .filter(|m| verdicts.get(&m.id).map(String::as_str) != Some(snapshots::SNAPSHOT))
         .collect()
 }
 
@@ -114,8 +117,6 @@ fn parse_response(text: &str) -> Result<HashSet<String>, String> {
     Ok(parsed.snapshot_ids.into_iter().collect())
 }
 
-/// Record a verdict for every memory in the batch: listed ids are snapshots,
-/// the rest are knowledge and won't be asked about again.
 pub fn record_verdicts(
     batch: &[&Memory],
     snapshot_ids: &HashSet<String>,
@@ -146,14 +147,18 @@ pub fn archive_stale(
             continue;
         }
         if memories::archive(&m.id)? {
-            history::record(
+            let logged = history::record(
                 "archive",
                 serde_json::json!({
                     "action": "archive",
                     "reason": "snapshot",
                     "memory_id": m.id,
                 }),
-            )?;
+            );
+            if let Err(e) = logged {
+                memories::unarchive(&m.id)?;
+                return Err(e);
+            }
             archived += 1;
         }
     }
@@ -198,7 +203,8 @@ mod tests {
     fn prefilter_skips_knowledge_and_standing_rules() {
         assert!(!looks_like_snapshot(&mem("Deploys go through Kamal on Hetzner", "project", 0)));
         assert!(!looks_like_snapshot(&mem("Abandoned carts sync nightly", "project", 0)));
-        assert!(!looks_like_snapshot(&mem("Never merge without approval", "feedback", 0)));
+        assert!(!looks_like_snapshot(&mem("Status checks must pass before merge", "feedback", 0)));
+        assert!(!looks_like_snapshot(&mem("Byron's status updates go in Slack", "user", 0)));
         assert!(!looks_like_snapshot(&mem("utf-8 handling in x-forwarded headers", "project", 0)));
     }
 
@@ -207,6 +213,8 @@ mod tests {
         let now = 100 * 24 * 3600;
         let fresh = mem("fresh", "project", now - MAX_AGE_SECS + 60);
         let old = mem("old", "project", now - MAX_AGE_SECS);
+        let old_but_touched = Memory { updated_at: now, ..mem("touched", "project", now - MAX_AGE_SECS) };
+        assert!(is_stale(&old_but_touched, now, false));
         assert!(!is_stale(&fresh, now, false));
         assert!(is_stale(&fresh, now, true));
         assert!(is_stale(&old, now, false));
@@ -271,6 +279,17 @@ mod tests {
         assert!(snapshots::tombstone_for("QKA-9001 quokka checkout rewrite DONE", "", &stale.content)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn confirmed_snapshots_are_left_out_of_merges() {
+        let batch = vec![mem("snap", "project", 0), mem("lesson", "project", 0), mem("unreviewed", "project", 0)];
+        let verdicts = HashMap::from([
+            ("snap".to_string(), snapshots::SNAPSHOT.to_string()),
+            ("lesson".to_string(), snapshots::KNOWLEDGE.to_string()),
+        ]);
+        let ids: Vec<&str> = excluding_snapshots(&batch, &verdicts).iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["lesson", "unreviewed"]);
     }
 
     #[test]
