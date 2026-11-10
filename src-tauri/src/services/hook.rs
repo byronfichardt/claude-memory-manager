@@ -105,27 +105,7 @@ pub fn run() -> Result<(), String> {
     // as a deterministic manual memory.
     if let Some(text_to_save) = extract_remember_directive(&event.prompt) {
         match save_user_memory(&conn, text_to_save, active_project.as_deref()) {
-            Ok(RememberOutcome::Snapshot(title)) => {
-                out.push_str("<memory-not-saved>\n");
-                out.push_str(&format!(
-                    "✗ Not saved: the user's `remember:` text matches a status snapshot that was archived as stale.\nArchived title: {}\n",
-                    title
-                ));
-                out.push_str("Tell the user it was not saved because progress/status updates are not kept as memories. If there is a lasting lesson in it, offer to save that instead with memory_add.\n");
-                out.push_str("</memory-not-saved>\n\n");
-            }
-            Ok(RememberOutcome::Saved(title)) => {
-                out.push_str(&format!(
-                    "<memory-saved>\n✓ Memory saved automatically via the user's `remember:` directive.\nTitle: {}\n{}",
-                    title, REMEMBER_ACK
-                ));
-            }
-            Ok(RememberOutcome::Duplicate(title)) => {
-                out.push_str(&format!(
-                    "<memory-saved>\n✓ A very similar memory already exists — not saved again.\nTitle: {}\n{}",
-                    title, REMEMBER_ACK
-                ));
-            }
+            Ok(outcome) => out.push_str(&render_remember(&outcome)),
             Err(e) => {
                 eprintln!("[hook] remember save failed: {}", e);
                 // Fall through to normal retrieval anyway
@@ -743,12 +723,6 @@ fn extract_remember_directive(prompt: &str) -> Option<String> {
     None
 }
 
-/// Save a user-directed memory. Derives a title from the first sentence or
-/// first MAX_TITLE_LEN chars. Content is the full text. Returns the title.
-///
-/// NOTE: `remember:` directives are currently classified as type=user, which is
-/// always global per scope rules. The `active_project` param is plumbed through
-/// for future directives that support scoped saves (e.g. `remember-here:`).
 #[derive(Debug, PartialEq)]
 enum RememberOutcome {
     Saved(String),
@@ -756,6 +730,29 @@ enum RememberOutcome {
     Snapshot(String),
 }
 
+fn render_remember(outcome: &RememberOutcome) -> String {
+    match outcome {
+        RememberOutcome::Snapshot(title) => format!(
+            "<memory-not-saved>\n✗ Not saved: the user's `remember:` text matches a status snapshot that was archived as stale.\nArchived title: {}\nTell the user it was not saved because progress/status updates are not kept as memories. If there is a lasting lesson in it, offer to save that instead with memory_add.\n</memory-not-saved>\n\n",
+            title
+        ),
+        RememberOutcome::Saved(title) => format!(
+            "<memory-saved>\n✓ Memory saved automatically via the user's `remember:` directive.\nTitle: {}\n{}",
+            title, REMEMBER_ACK
+        ),
+        RememberOutcome::Duplicate(title) => format!(
+            "<memory-saved>\n✓ A very similar memory already exists — not saved again.\nTitle: {}\n{}",
+            title, REMEMBER_ACK
+        ),
+    }
+}
+
+/// Save a user-directed memory. Derives a title from the first sentence or
+/// first MAX_TITLE_LEN chars. Content is the full text. Returns what happened.
+///
+/// NOTE: `remember:` directives are currently classified as type=user, which is
+/// always global per scope rules. The `active_project` param is plumbed through
+/// for future directives that support scoped saves (e.g. `remember-here:`).
 fn save_user_memory(
     conn: &Connection,
     text: String,
@@ -845,6 +842,9 @@ mod tests {
         })
         .unwrap();
         assert_eq!(outcome, RememberOutcome::Snapshot(snap.title));
+        let rendered = render_remember(&outcome);
+        assert!(rendered.starts_with("<memory-not-saved>"));
+        assert!(!rendered.contains("already saved"));
 
         let outcome = store::with_conn(|c| {
             save_user_memory(c, "Bilby importer needs the legacy CSV header row skipped".to_string(), None)

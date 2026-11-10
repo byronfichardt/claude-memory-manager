@@ -293,6 +293,33 @@ mod tests {
     }
 
     #[test]
+    fn archive_is_rolled_back_when_undo_entry_cannot_be_written() {
+        let _store = crate::store::test_store();
+        let snap = memories::insert(memories::NewMemory {
+            title: "Dingo cache warmup DONE".to_string(),
+            description: String::new(),
+            content: "Dingo cache warmup shipped".to_string(),
+            memory_type: Some("project".to_string()),
+            topic: None,
+            source: None,
+            project: None,
+        })
+        .unwrap();
+        let verdicts = HashMap::from([(snap.id.clone(), snapshots::SNAPSHOT.to_string())]);
+        let block_history = |sql: &str| {
+            history::ensure_table().unwrap();
+            crate::store::with_conn(|c| c.execute_batch(sql).map_err(|e| e.to_string())).unwrap();
+        };
+
+        block_history("CREATE TRIGGER block_history BEFORE INSERT ON history BEGIN SELECT RAISE(FAIL, 'blocked'); END;");
+        let result = archive_stale(&[snap.clone()], &verdicts, &HashSet::from([snap.id.clone()]), 0);
+        block_history("DROP TRIGGER block_history;");
+
+        assert!(result.is_err());
+        assert!(memories::get(&snap.id).unwrap().unwrap().archived_at.is_none());
+    }
+
+    #[test]
     fn parses_fenced_response() {
         let ids = parse_response("```json\n{\"snapshot_ids\": [\"a\", \"b\"]}\n```").unwrap();
         assert_eq!(ids, HashSet::from(["a".to_string(), "b".to_string()]));
