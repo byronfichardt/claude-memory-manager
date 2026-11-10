@@ -438,9 +438,7 @@ pub async fn run_full_pass(handle: Option<AppHandle>, force: bool) -> Result<Org
         Err(e) => report.errors.push(format!("split: {}", e)),
     }
 
-    if let Err(e) = settle_conflicts(&mut report) {
-        report.errors.push(format!("conflicts: {}", e));
-    }
+    settle_and_count_conflicts(&mut report);
 
     // Phase 5: prune the low-signal `relates-to` graph. Co-access wiring adds
     // edges on every prompt, so this bounded sweep every pass stops the graph
@@ -1553,10 +1551,21 @@ fn apply_discovered_edges(
     Ok(())
 }
 
+/// Settles what it can, then counts every contradiction left for the user, even
+/// when settling stopped partway.
+fn settle_and_count_conflicts(report: &mut OrganizerReport) {
+    if let Err(e) = settle_conflicts(report) {
+        report.errors.push(format!("conflicts: {}", e));
+    }
+    if let Ok(n) = dreams::pending_conflict_count() {
+        report.conflicts_waiting = n as usize;
+    }
+}
+
 /// Settle every live `contradicts` pair by rule where one decides it, and
 /// queue only the rest for the user. Pairs the user already answered, and
 /// conflicts reopened by an undo, are left alone.
-pub fn settle_conflicts(report: &mut OrganizerReport) -> Result<(), String> {
+fn settle_conflicts(report: &mut OrganizerReport) -> Result<(), String> {
     for edge in edges::list_by_type("contradicts")? {
         let (a, b) = match (memories::get(&edge.source_id)?, memories::get(&edge.target_id)?) {
             (Some(a), Some(b)) if a.archived_at.is_none() && b.archived_at.is_none() => (a, b),
@@ -1602,7 +1611,6 @@ pub fn settle_conflicts(report: &mut OrganizerReport) -> Result<(), String> {
             }
         }
     }
-    report.conflicts_waiting = dreams::pending_conflict_count()? as usize;
     Ok(())
 }
 
@@ -1639,6 +1647,9 @@ fn resolve_conflict_as(proposal_id: &str, keep_id: &str, origin: &str) -> Result
         .ok_or_else(|| format!("dream proposal not found: {}", proposal_id))?;
     if proposal.proposal_type != "conflict" {
         return Err(format!("proposal {} is not a conflict", proposal_id));
+    }
+    if proposal.status != "pending" {
+        return Err("this contradiction has already been settled".to_string());
     }
     let drop_id = match (proposal.target_memory_id, proposal.related_memory_id) {
         (Some(a), Some(b)) if a == keep_id => b,
@@ -1895,8 +1906,17 @@ mod tests {
         let archived = |m: &memories::Memory| memories::get(&m.id).unwrap().unwrap().archived_at.is_some();
         let settle = || {
             let mut report = OrganizerReport::default();
-            settle_conflicts(&mut report).unwrap();
-            (report.conflicts_auto_resolved, report.conflicts_dropped, report.conflicts_raised)
+            settle_and_count_conflicts(&mut report);
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+            (
+                report.conflicts_auto_resolved,
+                report.conflicts_dropped,
+                report.conflicts_raised,
+                report.conflicts_waiting,
+            )
+        };
+        let edge_types = |m: &memories::Memory| -> Vec<String> {
+            edges::list_by_memory(&m.id).unwrap().into_iter().map(|e| e.edge_type).collect()
         };
 
         let status_of = |a: &memories::Memory, b: &memories::Memory| {
@@ -1931,7 +1951,7 @@ mod tests {
         let new_note = new("Write to prod for this fix", "project", Some("/p/a"), 200);
         contradict(&old_rule, &new_note);
 
-        assert_eq!(settle(), (2, 2, 1));
+        assert_eq!(settle(), (2, 2, 1, 1));
         assert!(archived(&backlog_old) && !archived(&backlog_new));
         assert_eq!(status_of(&backlog_old, &backlog_new), "applied");
         assert!(!archived(&kept_a) && !archived(&kept_b));
@@ -1939,27 +1959,29 @@ mod tests {
         assert_eq!(status_of(&card_a, &card_b), "dismissed");
         assert!(edges::list_by_memory(&card_a.id).unwrap().is_empty());
         assert!(archived(&old_note) && !archived(&new_rule));
-        let mut report = OrganizerReport::default();
-        settle_conflicts(&mut report).unwrap();
-        assert_eq!(report.conflicts_waiting, 1);
+        assert_eq!(edge_types(&old_note), vec!["supersedes"]);
         assert!(!archived(&here) && !archived(&there));
         assert!(edges::list_by_memory(&here.id).unwrap().is_empty());
-        assert_eq!(settle(), (0, 0, 0));
+        assert_eq!(settle(), (0, 0, 0, 1));
 
         dreams::save_proposals(&[]).unwrap();
         let disputed = dreams::list_pending().unwrap().pop().expect("dream run kept the dispute");
         assert!(resolve_conflict(&disputed.id, "not-a-side").is_err());
         resolve_conflict(&disputed.id, &old_rule.id).unwrap();
         assert!(archived(&new_note));
+        assert_eq!(edge_types(&new_note), vec!["supersedes"]);
+        assert!(resolve_conflict(&disputed.id, &old_rule.id).is_err());
 
         crate::store::with_conn(|c| c.execute("UPDATE history SET timestamp = 0", []).map_err(|e| e.to_string()))
             .unwrap();
         undo_last().unwrap();
         assert!(!archived(&new_note));
+        assert_eq!(edge_types(&new_note), vec!["contradicts"]);
         undo_last().unwrap();
         assert!(!archived(&old_note));
+        assert_eq!(edge_types(&old_note), vec!["contradicts"]);
         assert_eq!(dreams::pending_count().unwrap(), 2);
-        assert_eq!(settle(), (0, 0, 0));
+        assert_eq!(settle(), (0, 0, 0, 2));
         assert!(!archived(&old_note));
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -140,7 +140,7 @@ pub fn graph_edge_boosts_end(edge_type: &str, end_is_target: bool) -> bool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictVerdict {
-    /// Different projects may legitimately differ.
+    /// Different projects, or a project's exception to a global memory: both stay.
     Unrelated,
     /// Index (0 or 1) of the memory to keep.
     Keep(usize),
