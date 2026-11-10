@@ -138,17 +138,48 @@ fn clear_pending() -> Result<(), String> {
     })
 }
 
-/// Any proposal, in any status, already raised for this pair. A dismissed
+/// Marks a conflict whose resolution was undone: it goes back to the user and
+/// is never settled automatically again.
+pub const CONFLICT_REOPENED: &str = "reopened";
+
+/// The proposal, in any status, already raised for this pair. A dismissed
 /// conflict means "keep both" and is never raised again.
-pub fn conflict_exists(a: &str, b: &str) -> Result<bool, String> {
+pub fn find_conflict(a: &str, b: &str) -> Result<Option<DreamProposal>, String> {
     with_conn(|conn| {
-        conn.prepare(
-            r#"SELECT 1 FROM dream_proposals WHERE proposal_type = 'conflict'
-               AND ((target_memory_id = ?1 AND related_memory_id = ?2)
-                 OR (target_memory_id = ?2 AND related_memory_id = ?1))"#,
+        let mut stmt = conn
+            .prepare(
+                r#"SELECT * FROM dream_proposals WHERE proposal_type = 'conflict'
+                   AND ((target_memory_id = ?1 AND related_memory_id = ?2)
+                     OR (target_memory_id = ?2 AND related_memory_id = ?1))
+                   ORDER BY created_at DESC LIMIT 1"#,
+            )
+            .map_err(|e| format!("prepare find_conflict: {}", e))?;
+        let mut rows = stmt
+            .query_map(params![a, b], row_to_proposal)
+            .map_err(|e| format!("find_conflict: {}", e))?;
+        rows.next().transpose().map_err(|e| e.to_string())
+    })
+}
+
+pub fn pending_conflict_count() -> Result<i64, String> {
+    with_conn(|conn| {
+        conn.query_row(
+            "SELECT COUNT(*) FROM dream_proposals WHERE status = 'pending' AND proposal_type = 'conflict'",
+            [],
+            |r| r.get(0),
         )
-        .and_then(|mut s| s.exists(params![a, b]))
-        .map_err(|e| format!("conflict_exists: {}", e))
+        .map_err(|e| e.to_string())
+    })
+}
+
+pub fn reopen_conflict(id: &str) -> Result<(), String> {
+    with_conn(|conn| {
+        conn.execute(
+            "UPDATE dream_proposals SET status = 'pending', description = ?1 WHERE id = ?2",
+            params![CONFLICT_REOPENED, id],
+        )
+        .map_err(|e| format!("reopen conflict: {}", e))?;
+        Ok(())
     })
 }
 

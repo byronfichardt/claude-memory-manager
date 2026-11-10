@@ -264,7 +264,7 @@ pub fn get_neighbors_deep(memory_id: &str, depth: u32) -> Result<Vec<MemoryEdge>
 pub fn list_by_type(edge_type: &str) -> Result<Vec<MemoryEdge>, String> {
     with_conn(|conn| {
         let mut stmt = conn
-            .prepare("SELECT * FROM memory_edges WHERE edge_type = ?1")
+            .prepare("SELECT * FROM memory_edges WHERE edge_type = ?1 ORDER BY id")
             .map_err(|e| format!("prepare list_by_type: {}", e))?;
         let rows = stmt
             .query_map(params![edge_type], row_to_edge)

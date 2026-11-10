@@ -138,6 +138,42 @@ pub fn graph_edge_boosts_end(edge_type: &str, end_is_target: bool) -> bool {
     !(edge_type == "supersedes" && end_is_target)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictVerdict {
+    /// Different projects, or a project's exception to a global memory: both stay.
+    Unrelated,
+    /// Index (0 or 1) of the memory to keep.
+    Keep(usize),
+    /// A newer project note disputes an older standing rule.
+    Ask,
+}
+
+/// The newer memory wins, except that a project note never overrides a
+/// standing rule (ask), and a project-scoped memory never archives a global one
+/// (a local exception, so both stay).
+pub fn conflict_verdict(
+    a: (Option<&str>, Option<&str>, i64),
+    b: (Option<&str>, Option<&str>, i64),
+) -> ConflictVerdict {
+    let (a_type, a_project, a_created) = a;
+    let (b_type, b_project, b_created) = b;
+    if matches!((a_project, b_project), (Some(x), Some(y)) if x != y) {
+        return ConflictVerdict::Unrelated;
+    }
+    let (newer, newer_type, older_type, local_beats_global) = if a_created >= b_created {
+        (0, a_type, b_type, a_project.is_some() && b_project.is_none())
+    } else {
+        (1, b_type, a_type, b_project.is_some() && a_project.is_none())
+    };
+    if is_standing_rule(older_type) && !is_standing_rule(newer_type) {
+        ConflictVerdict::Ask
+    } else if local_beats_global {
+        ConflictVerdict::Unrelated
+    } else {
+        ConflictVerdict::Keep(newer)
+    }
+}
+
 pub fn usage_score(access_count: i64) -> f64 {
     let n = access_count.max(0) as f64;
     (1.0 + n).ln() / (201.0_f64).ln()
@@ -410,5 +446,38 @@ mod tests {
         assert!(!graph_edge_boosts_end("supersedes", true));
         assert!(graph_edge_boosts_end("supersedes", false));
         assert!(graph_edge_boosts_end("relates-to", true));
+    }
+
+    #[test]
+    fn newer_memory_wins_unless_a_project_note_disputes_a_rule() {
+        let side = |t: &'static str, p: Option<&'static str>, at: i64| (Some(t), p, at);
+        assert_eq!(
+            conflict_verdict(side("project", Some("/a"), 1), side("project", Some("/b"), 2)),
+            ConflictVerdict::Unrelated
+        );
+        assert_eq!(
+            conflict_verdict(side("project", Some("/a"), 1), side("feedback", None, 2)),
+            ConflictVerdict::Keep(1)
+        );
+        assert_eq!(
+            conflict_verdict(side("project", Some("/a"), 2), side("project", Some("/a"), 1)),
+            ConflictVerdict::Keep(0)
+        );
+        assert_eq!(
+            conflict_verdict(side("feedback", None, 1), side("project", Some("/a"), 2)),
+            ConflictVerdict::Ask
+        );
+        assert_eq!(
+            conflict_verdict(side("feedback", None, 1), side("feedback", Some("/a"), 2)),
+            ConflictVerdict::Unrelated
+        );
+        assert_eq!(
+            conflict_verdict(side("project", None, 1), side("project", Some("/a"), 2)),
+            ConflictVerdict::Unrelated
+        );
+        assert_eq!(
+            conflict_verdict(side("feedback", Some("/a"), 1), side("feedback", None, 2)),
+            ConflictVerdict::Keep(1)
+        );
     }
 }
