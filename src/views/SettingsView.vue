@@ -983,8 +983,9 @@ function goHome() {
                 <span class="num">{{ app.lastOrganizeReport.classified_count }}</span>,
                 merged <span class="num">{{ app.lastOrganizeReport.merged_count }}</span><template v-if="app.lastOrganizeReport.new_topics_created.length">,
                 {{ app.lastOrganizeReport.new_topics_created.length }} new topic<template v-if="app.lastOrganizeReport.new_topics_created.length !== 1">s</template></template><template v-if="app.lastOrganizeReport.split_topics?.length">,
-                split <span class="num">{{ app.lastOrganizeReport.split_topics.length }}</span> topic<template v-if="app.lastOrganizeReport.split_topics.length !== 1">s</template></template><template v-if="app.lastOrganizeReport.conflicts_raised">,
-                <span class="num">{{ app.lastOrganizeReport.conflicts_raised }}</span> contradiction<template v-if="app.lastOrganizeReport.conflicts_raised !== 1">s</template> to resolve in Dreaming</template>.
+                split <span class="num">{{ app.lastOrganizeReport.split_topics.length }}</span> topic<template v-if="app.lastOrganizeReport.split_topics.length !== 1">s</template></template><template v-if="app.lastOrganizeReport.conflicts_auto_resolved">,
+                settled <span class="num">{{ app.lastOrganizeReport.conflicts_auto_resolved }}</span> contradiction<template v-if="app.lastOrganizeReport.conflicts_auto_resolved !== 1">s</template> (newer kept)</template><template v-if="app.lastOrganizeReport.conflicts_raised">,
+                <span class="num">{{ app.lastOrganizeReport.conflicts_raised }}</span> to decide in Dreaming</template>.
                 <template v-if="app.lastOrganizeReport.errors?.length">
                   <span class="organize-errors">
                     {{ app.lastOrganizeReport.errors.length }} error{{ app.lastOrganizeReport.errors.length === 1 ? '' : 's' }}:

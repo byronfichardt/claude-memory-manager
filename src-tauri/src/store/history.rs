@@ -49,7 +49,7 @@ pub fn list_recent(limit: i64) -> Result<Vec<HistoryEntry>, String> {
     ensure_table()?;
     with_conn(|conn| {
         let mut stmt = conn
-            .prepare("SELECT id, action, timestamp, snapshot FROM history ORDER BY timestamp DESC LIMIT ?1")
+            .prepare("SELECT id, action, timestamp, snapshot FROM history ORDER BY timestamp DESC, id DESC LIMIT ?1")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(params![limit], |r| {
