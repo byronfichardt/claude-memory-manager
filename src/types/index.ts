@@ -67,6 +67,15 @@ export interface BootstrapStatus {
   managed_section_present: boolean;
 }
 
+export interface AuthStatus {
+  logged_in: boolean;
+  config_dir: string;
+  email: string | null;
+  org_name: string | null;
+  auth_method: string | null;
+  error: string | null;
+}
+
 export interface OrganizerConfigDir {
   configured: string;
   effective: string;

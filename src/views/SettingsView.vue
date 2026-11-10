@@ -13,6 +13,7 @@ import type {
   ImportReport,
   ImportMode,
   EmbeddingStatus,
+  AuthStatus,
 } from "@/types";
 
 const router = useRouter();
@@ -281,6 +282,53 @@ async function onOrganizerDirChange(event: Event) {
   } finally {
     organizerDirSaving.value = false;
   }
+  await refreshAuthStatus();
+}
+
+const authStatus = ref<AuthStatus | null>(null);
+const authChecking = ref(false);
+const authWaitingForLogin = ref(false);
+let authPollTimer: ReturnType<typeof setInterval> | null = null;
+
+async function refreshAuthStatus() {
+  authChecking.value = true;
+  try {
+    authStatus.value = await tauri.getOrganizerAuthStatus();
+  } catch (e) {
+    authStatus.value = { logged_in: false, config_dir: "", email: null, org_name: null, auth_method: null, error: String(e) };
+  } finally {
+    authChecking.value = false;
+  }
+  if (authStatus.value?.logged_in) stopAuthPolling();
+}
+
+function stopAuthPolling() {
+  if (authPollTimer) clearInterval(authPollTimer);
+  authPollTimer = null;
+  authWaitingForLogin.value = false;
+}
+
+const LOGIN_POLL_MS = 3000;
+const LOGIN_POLL_LIMIT_MS = 5 * 60 * 1000;
+
+async function signInToClaude() {
+  organizerDirError.value = null;
+  try {
+    await tauri.openOrganizerLogin();
+  } catch (e) {
+    organizerDirError.value = String(e);
+    return;
+  }
+  stopAuthPolling();
+  authWaitingForLogin.value = true;
+  const startedAt = Date.now();
+  authPollTimer = setInterval(() => {
+    if (Date.now() - startedAt > LOGIN_POLL_LIMIT_MS) {
+      stopAuthPolling();
+      return;
+    }
+    refreshAuthStatus();
+  }, LOGIN_POLL_MS);
 }
 
 function configDirLabel(path: string): string {
@@ -357,6 +405,7 @@ function startEmbeddingPolling() {
 
 onMounted(async () => {
   app.loadStatus();
+  refreshAuthStatus();
   await refreshEmbeddingStatus();
   if (embeddingStatus.value?.is_downloading || embeddingStatus.value?.is_sweeping) {
     startEmbeddingPolling();
@@ -368,6 +417,7 @@ onUnmounted(() => {
     clearInterval(embeddingPollTimer);
     embeddingPollTimer = null;
   }
+  stopAuthPolling();
 });
 
 function embeddingStatusLabel(s: EmbeddingStatus): string {
@@ -596,6 +646,28 @@ function goHome() {
               <code class="inline-code">claude -p</code>. Every AI pass bills
               this account, whichever profile saved the memory.
             </p>
+            <div class="sub">
+              <span v-if="authChecking && !authStatus" class="status-line">
+                <span class="status-dot"></span>
+                Checking sign-in…
+              </span>
+              <span v-else-if="authStatus?.logged_in" class="status-line ok">
+                <span class="status-dot"></span>
+                Signed in{{ authStatus.email ? ` as ${authStatus.email}` : "" }}{{ authStatus.org_name ? ` (${authStatus.org_name})` : "" }}
+              </span>
+              <span v-else-if="authWaitingForLogin" class="status-line">
+                <span class="status-dot pulse"></span>
+                Finish signing in in the Terminal window that opened…
+              </span>
+              <span v-else-if="authStatus?.error" class="status-line warn">
+                <span class="status-dot"></span>
+                {{ authStatus.error }}
+              </span>
+              <span v-else-if="authStatus" class="status-line warn">
+                <span class="status-dot"></span>
+                Not signed in — organize and dream can't run until you sign in
+              </span>
+            </div>
             <div v-if="organizerDirError" class="error inline-error">
               {{ organizerDirError }}
             </div>
@@ -618,6 +690,23 @@ function goHome() {
               {{ config.label }}
             </option>
           </select>
+        </div>
+        <div class="button-group auth-actions">
+          <button
+            v-if="authStatus && !authStatus.logged_in"
+            class="primary-btn sm"
+            :disabled="authWaitingForLogin"
+            @click="signInToClaude"
+          >
+            Sign in
+          </button>
+          <button
+            class="ghost-btn sm"
+            :disabled="authChecking"
+            @click="refreshAuthStatus"
+          >
+            {{ authChecking ? "Checking…" : "Check sign-in" }}
+          </button>
         </div>
       </div>
 
@@ -1332,6 +1421,9 @@ function goHome() {
   gap: 0.5rem;
   flex-shrink: 0;
   align-items: center;
+}
+.auth-actions {
+  margin-top: 0.625rem;
 }
 
 .primary-btn {
