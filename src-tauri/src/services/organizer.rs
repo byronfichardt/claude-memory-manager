@@ -194,7 +194,7 @@ DO NOT SPLIT when:
 3. The split would just create a project-name topic (e.g. "hearth-deployment") — project-specific buckets are explicitly discouraged.
 4. You're uncertain. A large coherent topic is better than a bad split.
 
-When splitting, you may leave some members in the original topic by naming it as one of the sub-topics. Every member_id you list must currently be in the topic being evaluated.
+When splitting, you may leave some members in the original topic by naming it as one of the sub-topics. Every member_id you list must currently be in the topic being evaluated. Write every id out in full — never shorten a list with "..." or a comment.
 
 Respond with ONLY valid JSON (no prose, no markdown fences). If no split is warranted:
 {"split": false, "reason": "brief justification"}
@@ -209,6 +209,7 @@ Rules:
 2. Memories that discuss the same topic but contain different facts are NOT duplicates.
 3. For each duplicate group, provide a merged version that preserves all unique information.
 4. Skip singletons — they are not duplicates.
+5. Never group memories whose project differs — the same rule can be right in one repo and wrong in another.
 
 Respond with ONLY valid JSON (no prose, no markdown fences):
 {"merges": [{"source_ids": ["id1", "id2"], "merged_title": "...", "merged_description": "...", "merged_content": "..."}]}"#;
@@ -746,7 +747,7 @@ async fn evaluate_split(
     let response = client.analyze(SPLIT_SYSTEM, &prompt).await?;
     let json = extract_json(&response.text);
     let parsed: AiSplitResponse = serde_json::from_str(json)
-        .map_err(|e| format!("parse split response: {} (raw: {})", e, truncate(json, 300)))?;
+        .map_err(|e| format!("parse split response: {} (near: {})", e, json_error_excerpt(json, &e)))?;
 
     if !parsed.split || parsed.sub_topics.is_empty() {
         return Ok(None);
@@ -1104,9 +1105,10 @@ async fn dedup_batch(
         "These memories look similar (they may be in different topics). Identify near-duplicates:\n\n",
     );
 
-    for m in batch {
+    for m in &batch {
         prompt.push_str(&format!("[id={}]\n", m.id));
         prompt.push_str(&format!("title: {}\n", m.title));
+        prompt.push_str(&format!("project: {}\n", m.project.as_deref().unwrap_or("global")));
         if !m.description.is_empty() {
             prompt.push_str(&format!("description: {}\n", m.description));
         }
@@ -1119,7 +1121,20 @@ async fn dedup_batch(
     let parsed: AiDedupResponse = serde_json::from_str(json)
         .map_err(|e| format!("parse dedup response: {} (raw: {})", e, truncate(json, 200)))?;
 
-    Ok(parsed.merges)
+    let project_of: std::collections::HashMap<&str, Option<&str>> =
+        batch.iter().map(|m| (m.id.as_str(), m.project.as_deref())).collect();
+    Ok(parsed
+        .merges
+        .into_iter()
+        .filter(|merge| {
+            let projects: Vec<Option<&str>> = merge
+                .source_ids
+                .iter()
+                .filter_map(|id| project_of.get(id.as_str()).copied())
+                .collect();
+            dedup::merge_projects_compatible(&projects)
+        })
+        .collect())
 }
 
 fn apply_merge(merge: &Merge, topic: &str) -> Result<(), String> {
@@ -1138,15 +1153,6 @@ fn apply_merge(merge: &Merge, topic: &str) -> Result<(), String> {
             return Err(format!("merge refused: {} is a status snapshot", m.id));
         }
     }
-
-    // Snapshot originals for undo BEFORE any destructive op
-    let snapshot = serde_json::json!({
-        "action": "merge",
-        "topic": topic,
-        "originals": source_memories,
-        "merged_title": merge.merged_title,
-    });
-    history::record("merge", snapshot)?;
 
     let types: Vec<Option<&str>> = source_memories
         .iter()
@@ -1167,6 +1173,15 @@ fn apply_merge(merge: &Merge, topic: &str) -> Result<(), String> {
     }
     let memory_type = dedup::merge_memory_type(&types);
     let shared_project = dedup::merge_project(&projects);
+
+    // Snapshot originals for undo BEFORE any destructive op
+    let snapshot = serde_json::json!({
+        "action": "merge",
+        "topic": topic,
+        "originals": source_memories,
+        "merged_title": merge.merged_title,
+    });
+    history::record("merge", snapshot)?;
 
     // Insert the merged memory. Ordering: insert first, then delete sources.
     // If this errors halfway, we can still recover from the history log.
@@ -1747,6 +1762,15 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
+fn json_error_excerpt(json: &str, err: &serde_json::Error) -> String {
+    let line = json.lines().nth(err.line().saturating_sub(1)).unwrap_or("");
+    let chars: Vec<char> = line.chars().collect();
+    let at = err.column().saturating_sub(1).min(chars.len());
+    let start = at.saturating_sub(120);
+    let end = (at + 40).min(chars.len());
+    chars[start..end].iter().collect()
+}
+
 fn extract_json(text: &str) -> &str {
     let trimmed = text.trim();
 
@@ -2058,5 +2082,43 @@ mod tests {
         assert!(apply_merge(&merge, "numbat").unwrap_err().contains("status snapshot"));
         assert!(memories::get(&snap.id).unwrap().is_some());
         assert!(memories::get(&lesson.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn cross_project_merge_is_refused_without_a_history_entry() {
+        let _store = crate::store::test_store();
+        let add = |project: &str| {
+            memories::insert(memories::NewMemory {
+                title: "Run migrations before deploy".to_string(),
+                description: String::new(),
+                content: format!("Run migrations before deploying {project}"),
+                memory_type: Some("feedback".to_string()),
+                topic: None,
+                source: None,
+                project: Some(project.to_string()),
+            })
+            .unwrap()
+        };
+        let here = add("/repo/here");
+        let there = add("/repo/there");
+
+        let merge = Merge {
+            source_ids: vec![here.id.clone(), there.id.clone()],
+            merged_title: "Run migrations before deploy".to_string(),
+            merged_description: String::new(),
+            merged_content: "Run migrations before deploy".to_string(),
+        };
+        assert!(apply_merge(&merge, "deployment").unwrap_err().contains("different projects"));
+        let recorded = history::list_recent(1000).unwrap();
+        assert!(!recorded.iter().any(|e| e.snapshot.contains(&here.id)));
+        assert!(memories::get(&here.id).unwrap().is_some());
+        assert!(memories::get(&there.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn json_error_excerpt_points_at_the_failure() {
+        let json = r#"{"split": true, "sub_topics": [{"name": "pricing", "member_ids": ["a", "b" ...]}]}"#;
+        let err = serde_json::from_str::<AiSplitResponse>(json).err().unwrap();
+        assert!(json_error_excerpt(json, &err).ends_with(r#""b" ...]}]}"#));
     }
 }
