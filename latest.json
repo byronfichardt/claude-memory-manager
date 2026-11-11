@@ -1,11 +1,11 @@
 {
-  "version": "0.4.17",
-  "notes": "Fixes organize failing with 'Please run /login'; Settings now shows Claude sign-in status with a Sign in button.",
-  "pub_date": "2026-11-10T10:32:45Z",
+  "version": "0.4.18",
+  "notes": "Contradictions settle themselves by rule; old status notes are archived and kept out.",
+  "pub_date": "2026-11-11T07:11:19Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRHRDVzFneVAxV21BaTFmaEtOYTU0ZkF5c1U5ZzN0L1BVbjJrNi9QQ01xUkpZaTZWaEhrRlFWNkJSWTYyT0c1RFUxSjA1R25ha2ZPeDJ3RUZFWkRCK1FBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MzA2NzQ3CWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKSVh3ODNqc1VsblNBSkxZZlhPZStkeUFhRjRaaFJ0cGRZMmNMbEUvSFdSVU1lRmNvZDg5VU9pYTVIZ0ZyaytjT2VyRnYrQVRDODQ5K24rajRwd2VsQWc9PQo=",
-      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.17/Claude.Memory.Manager.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRGhEblN4dmphZElndlVsOHFBZmdHOXpoVFNONHR1LzhVT2RLcE5mK0t2cWtmRktKYkdzcDYzOVdJSmVIcmhBbHo2L2JvdkgwOFVNa2MydytVV0YvS2cwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MzgxMDY3CWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKK09hVjNqSTE3NVdFL1ZibUpVT3pRNHJ0YkVHdkt6TWNNdXpJZTNaWWZLTHVNcWlyZ25vQkpHOHY3U0lISzVkNVlKa3k4VC9xL0d1WjZmb0w4VXpFRHc9PQo=",
+      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.18/Claude.Memory.Manager.app.tar.gz"
     }
   }
 }
