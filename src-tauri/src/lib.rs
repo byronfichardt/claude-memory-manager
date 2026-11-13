@@ -143,6 +143,7 @@ pub fn run() {
             // file at <data_dir>/first-run.json.
             std::thread::spawn(|| {
                 services::installer::maybe_auto_bootstrap();
+                services::installer::upgrade_installed_hooks();
             });
 
             // Start background model download + sweep if semantic search was

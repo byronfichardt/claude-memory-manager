@@ -262,6 +262,22 @@ pub fn uninstall_everything() -> UninstallReport {
     }
 }
 
+/// Brings a hook installed by an older version up to every event it now answers.
+pub fn upgrade_installed_hooks() {
+    if !settings::get_bool(SETTING_HOOK_ENABLED, true).unwrap_or(true) {
+        return;
+    }
+    let binary = match std::env::current_exe() {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(_) => return,
+    };
+    for (_, dir) in bootstrap::list_claude_config_dirs() {
+        if bootstrap::memory_hook_needs_upgrade_in(&dir) {
+            let _ = bootstrap::ensure_memory_hook_in(&dir, &binary);
+        }
+    }
+}
+
 /// Attempt a first-time setup automatically on launch, so users who install
 /// this app and never click "Get started" still get CLAUDE.md injection,
 /// ingestion, MCP registration, and hook install.

@@ -20,6 +20,9 @@ pub struct Memory {
     /// When set, the memory is archived: kept in the store but excluded from
     /// recall (search + graph hydration). Set by prune-on-supersede; reversible.
     pub archived_at: Option<i64>,
+    /// When set, the memory is only true until then and is archived once it passes.
+    #[serde(default)]
+    pub expires_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +68,7 @@ pub(crate) fn row_to_memory(row: &Row) -> rusqlite::Result<Memory> {
         updated_at: row.get("updated_at")?,
         access_count: row.get("access_count")?,
         archived_at: row.get("archived_at")?,
+        expires_at: row.get("expires_at").unwrap_or(None),
     })
 }
 
@@ -227,12 +231,83 @@ pub fn archive_with_conn(conn: &Connection, id: &str) -> Result<bool, String> {
     Ok(changed > 0)
 }
 
-/// Restore an archived memory back into recall.
+pub fn set_expiry(id: &str, expires_at: Option<i64>) -> Result<(), String> {
+    with_conn(|conn| {
+        conn.execute(
+            "UPDATE memories SET expires_at = ?1 WHERE id = ?2",
+            params![expires_at, id],
+        )
+        .map_err(|e| format!("set_expiry: {}", e))?;
+        Ok(())
+    })
+}
+
+/// Archives every live memory whose `expires_at` has passed, stamping the
+/// archive time as the expiry so it reads as when the fact stopped being true.
+pub fn archive_expired_with_conn(conn: &Connection, now: i64) -> Result<usize, String> {
+    conn.execute(
+        "UPDATE memories SET archived_at = expires_at \
+         WHERE expires_at IS NOT NULL AND expires_at <= ?1 AND archived_at IS NULL",
+        params![now],
+    )
+    .map_err(|e| format!("archive_expired: {}", e))
+}
+
+pub fn archive_expired() -> Result<usize, String> {
+    with_conn(|conn| archive_expired_with_conn(conn, now_ts()))
+}
+
+/// Live memories about the user themself, most recently touched first: the
+/// standing profile shown at the start of every session.
+pub fn list_profile_with_conn(conn: &Connection, limit: u32) -> Result<Vec<Memory>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT * FROM memories WHERE memory_type = 'user' AND archived_at IS NULL \
+             ORDER BY updated_at DESC LIMIT ?1",
+        )
+        .map_err(|e| format!("prepare profile: {}", e))?;
+    let rows = stmt
+        .query_map(params![limit as i64], row_to_memory)
+        .map_err(|e| format!("query profile: {}", e))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
+/// Live memories in exactly `project`'s scope that overlap `text` without
+/// being near-duplicates: what already exists on the same subject.
+pub fn same_subject_with_conn(
+    conn: &Connection,
+    text: &str,
+    project: Option<&str>,
+    exclude: &[&str],
+    min_similarity: f64,
+    limit: usize,
+) -> Result<Vec<(Memory, f64)>, String> {
+    let mut scored: Vec<(Memory, f64)> = near_duplicate_candidates_with_conn(conn, text, project, 30)?
+        .into_iter()
+        .filter(|m| !exclude.contains(&m.id.as_str()))
+        .map(|m| {
+            let score = crate::services::dedup::lexical_similarity_text(
+                text,
+                &crate::services::dedup::embed_text(&m),
+            );
+            (m, score)
+        })
+        .filter(|(_, score)| *score + f64::EPSILON >= min_similarity)
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(limit);
+    Ok(scored)
+}
+
+/// Restore an archived memory back into recall. A lapsed expiry is cleared so
+/// the restore is not undone on the next expiry sweep.
 pub fn unarchive(id: &str) -> Result<(), String> {
     with_conn(|conn| {
         conn.execute(
-            "UPDATE memories SET archived_at = NULL WHERE id = ?1",
-            params![id],
+            "UPDATE memories SET archived_at = NULL, \
+             expires_at = CASE WHEN expires_at <= ?2 THEN NULL ELSE expires_at END \
+             WHERE id = ?1",
+            params![id, now_ts()],
         )
         .map_err(|e| format!("unarchive: {}", e))?;
         Ok(())
@@ -920,4 +995,105 @@ pub(crate) fn sanitize_fts_query_legacy(input: &str) -> String {
     }
 
     terms.join(" OR ")
+}
+
+#[cfg(test)]
+mod expiry_and_profile_tests {
+    use super::*;
+
+    fn add(title: &str, content: &str, memory_type: &str) -> Memory {
+        insert(NewMemory {
+            title: title.to_string(),
+            description: String::new(),
+            content: content.to_string(),
+            memory_type: Some(memory_type.to_string()),
+            topic: None,
+            source: None,
+            project: None,
+        })
+        .unwrap()
+    }
+
+    fn reload(id: &str) -> Memory {
+        get(id).unwrap().unwrap()
+    }
+
+    #[test]
+    fn lapsed_memories_are_archived_and_live_ones_are_not() {
+        let _store = crate::store::test_store();
+        let now = now_ts();
+        let lapsed = add("Wombat release freeze", "No wombat releases during the freeze", "feedback");
+        let current = add("Wombat leave window", "Wombat team on leave until spring", "feedback");
+        let lasting = add("Wombat deploys use Kamal", "Wombat deploys go through Kamal", "project");
+        set_expiry(&lapsed.id, Some(now - 10)).unwrap();
+        set_expiry(&current.id, Some(now + 86_400)).unwrap();
+
+        with_conn(|c| archive_expired_with_conn(c, now)).unwrap();
+
+        assert_eq!(reload(&lapsed.id).archived_at, Some(now - 10));
+        assert_eq!(reload(&current.id).archived_at, None);
+        assert_eq!(reload(&lasting.id).archived_at, None);
+    }
+
+    #[test]
+    fn restoring_a_lapsed_memory_clears_its_expiry_so_it_stays_restored() {
+        let _store = crate::store::test_store();
+        let now = now_ts();
+        let m = add("Numbat merge freeze", "No numbat merges this week", "feedback");
+        set_expiry(&m.id, Some(now - 10)).unwrap();
+        with_conn(|c| archive_expired_with_conn(c, now)).unwrap();
+
+        unarchive(&m.id).unwrap();
+        with_conn(|c| archive_expired_with_conn(c, now_ts())).unwrap();
+
+        let back = reload(&m.id);
+        assert_eq!(back.archived_at, None);
+        assert_eq!(back.expires_at, None);
+    }
+
+    #[test]
+    fn profile_lists_live_user_memories_only() {
+        let _store = crate::store::test_store();
+        let about = add("Quoll lives in Hobart", "Quoll lives in Hobart, Tasmania", "user");
+        let retired = add("Quoll lives in Perth", "Quoll lives in Perth", "user");
+        let rule = add("Quoll prefers tabs", "Quoll prefers tabs over spaces", "feedback");
+        archive(&retired.id).unwrap();
+
+        let ids: Vec<String> = with_conn(|c| list_profile_with_conn(c, 200))
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+
+        assert!(ids.contains(&about.id));
+        assert!(!ids.contains(&retired.id));
+        assert!(!ids.contains(&rule.id));
+    }
+
+    #[test]
+    fn same_subject_finds_overlapping_memories_in_scope_but_not_unrelated_ones() {
+        let _store = crate::store::test_store();
+        let existing = add(
+            "Potoroo staging database port",
+            "Potoroo staging Postgres listens on port 5433 on the Hetzner box",
+            "reference",
+        );
+        let unrelated = add("Potoroo logo colours", "Potoroo logo uses teal and sand", "reference");
+
+        let found = with_conn(|c| {
+            same_subject_with_conn(
+                c,
+                "Potoroo staging database moved: Postgres now listens on port 5434 on the Hetzner box",
+                None,
+                &[],
+                0.25,
+                3,
+            )
+        })
+        .unwrap();
+        let ids: Vec<&str> = found.iter().map(|(m, _)| m.id.as_str()).collect();
+
+        assert!(ids.contains(&existing.id.as_str()));
+        assert!(!ids.contains(&unrelated.id.as_str()));
+    }
 }

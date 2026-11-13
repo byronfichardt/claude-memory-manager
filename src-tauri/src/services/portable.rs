@@ -624,6 +624,7 @@ mod tests {
             updated_at: 2,
             access_count: 3,
             archived_at: None,
+            expires_at: None,
         };
         let exp: ExportedMemory = mem.into();
         assert_eq!(exp.id, "id1");

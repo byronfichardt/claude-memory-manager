@@ -348,6 +348,7 @@ mod tests {
             updated_at: 0,
             access_count: 0,
             archived_at: None,
+            expires_at: None,
         }
     }
 
