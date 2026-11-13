@@ -1,11 +1,11 @@
 {
-  "version": "0.4.19",
-  "notes": "Organize no longer reports cross-project merges as errors, and Undo last is no longer misled by refused merges.",
-  "pub_date": "2026-11-11T12:54:44Z",
+  "version": "0.4.20",
+  "notes": "Your profile is shown at the start of every Claude Code session, memories that are only true for a while can expire, and saving a memory points out ones already stored on the same subject.",
+  "pub_date": "2026-11-13T11:18:26Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRGhsaHhwRTdIY2xTRFpoczl5eHNxNGtDVzFLdFk0TTBwMXJxa25OZ1M4OGcvaHZONDJtSS9TcXM1NkNlM1hSdkVhRHlGejBWNkVQek5SS0dZcWNSZkFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NDAxNjcwCWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKd1VNUVNBaXVRV0dKWk5OeGEwd1pWU0pmYVpEZDY3bW5maGU5T0VTVEYybFB1VVpHcG5jUzlhem1uQlVoSmxiTWRITkFYOFQydmw3L2pxRE5mRXZrQmc9PQo=",
-      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.19/Claude.Memory.Manager.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRHRGSWY4cmprZktBMitUcEZhSThHc09KeGg0UmFCc0NnVlhYRUQwK3UzdHFJbk1CajFsNUJCL0V3SS9BbWJJZFNLNWdXcmdyMHNXTWY0SmJ4ZnR0SHdVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTY4Njg0CWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKcDN0ZHBsVW9IbjBNZlBjVVpzT2xFUjAxTWUyaGZFZlIwZU16eEk3UnB6S3pLQ1dSQm43MnJiSlJrSitmdG93cjFLNkp6VmZNdm9Ua3I3SW1aZ0JUQXc9PQo=",
+      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.20/Claude.Memory.Manager.app.tar.gz"
     }
   }
 }
