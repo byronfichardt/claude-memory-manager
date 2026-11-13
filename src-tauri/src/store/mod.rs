@@ -374,7 +374,31 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
             .map_err(|e| format!("bump v10: {}", e))?;
     }
 
+    if version < 11 {
+        apply_migration_v11(conn)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (11)", [])
+            .map_err(|e| format!("bump v11: {}", e))?;
+    }
+
     Ok(())
+}
+
+/// A memory that is only true for a while carries `expires_at`; once it passes,
+/// the memory is archived like any other retired memory.
+fn apply_migration_v11(conn: &Connection) -> Result<(), String> {
+    let has_col: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('memories') WHERE name = 'expires_at'")
+        .and_then(|mut s| s.exists([]))
+        .unwrap_or(false);
+    if !has_col {
+        conn.execute_batch("ALTER TABLE memories ADD COLUMN expires_at INTEGER;")
+            .map_err(|e| format!("migration v11 add column: {}", e))?;
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_memories_expiring ON memories(expires_at) \
+         WHERE expires_at IS NOT NULL AND archived_at IS NULL;",
+    )
+    .map_err(|e| format!("migration v11 index: {}", e))
 }
 
 /// A conflict proposal names both sides of a `contradicts` edge.

@@ -1,4 +1,4 @@
-//! Background upkeep: edge prune plus auto-organize.
+//! Background upkeep: expiry sweep, edge prune and auto-organize.
 //!
 //! Runs in the tray app and in every MCP server process, because the tray app
 //! is often not running while Claude Code sessions are. A DB lease lets one
@@ -9,7 +9,7 @@ use std::time::Duration;
 use tauri::AppHandle;
 
 use crate::services::organizer;
-use crate::store::settings;
+use crate::store::{memories, settings};
 
 const CHECK_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
@@ -35,6 +35,12 @@ async fn tick(handle: Option<AppHandle>) {
     let now = chrono::Utc::now().timestamp();
     if !settings::claim_lease(SETTING_TICK_LEASE, now, now + TICK_LEASE_SECS).unwrap_or(false) {
         return;
+    }
+
+    match tauri::async_runtime::spawn_blocking(memories::archive_expired).await {
+        Ok(Ok(n)) if n > 0 => eprintln!("maintenance: archived {} expired memories", n),
+        Ok(Err(e)) => eprintln!("maintenance: expiry sweep failed: {}", e),
+        _ => {}
     }
 
     match tauri::async_runtime::spawn_blocking(organizer::prune_weak_edges).await {

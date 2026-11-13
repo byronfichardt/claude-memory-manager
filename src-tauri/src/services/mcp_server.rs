@@ -202,7 +202,7 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "memory_add",
-                "description": "Save a new memory to the store. You MUST call this proactively — don't wait for the user to ask. Save user corrections, project conventions, debugging findings, stated preferences, architecture decisions, and workflow discoveries. A typical session should produce 3-10 memories. Be specific and include enough context that the memory is useful in future sessions.\n\nDO NOT SAVE STATUS SNAPSHOTS: progress logs, 'X is done/shipped/merged', handoff notes, what is left to do, or the current state of a ticket. They go stale within days and are archived automatically; a near-copy of an archived snapshot is refused. Save the lasting lesson instead (the decision, the gotcha, how it works).\n\nPROJECT SCOPING: If the memory is a user preference or cross-project rule (type=user/feedback/reference), leave `project` unset — it will be saved as global. If it's a specific fact about the current codebase (type=project), set `project` to the absolute git-root path of that project. Type=user is ALWAYS saved as global regardless.\n\nCORRECTING AN EXISTING MEMORY: if this memory corrects, replaces or updates one you just read, you MUST pass its id in `supersedes`. Writing a bare 'CORRECTION: ...' memory does NOT retire the old one — dedup will not catch it, because a correction is worded differently from what it corrects, and BOTH will keep being recalled as equally valid. Search first, then supersede.",
+                "description": "Save a new memory to the store. You MUST call this proactively — don't wait for the user to ask. Save user corrections, project conventions, debugging findings, stated preferences, architecture decisions, and workflow discoveries. A typical session should produce 3-10 memories. Be specific and include enough context that the memory is useful in future sessions.\n\nDO NOT SAVE STATUS SNAPSHOTS: progress logs, 'X is done/shipped/merged', handoff notes, what is left to do, or the current state of a ticket. They go stale within days and are archived automatically; a near-copy of an archived snapshot is refused. Save the lasting lesson instead (the decision, the gotcha, how it works).\n\nPROJECT SCOPING: If the memory is a user preference or cross-project rule (type=user/feedback/reference), leave `project` unset — it will be saved as global. If it's a specific fact about the current codebase (type=project), set `project` to the absolute git-root path of that project. Type=user is ALWAYS saved as global regardless.\n\nCORRECTING AN EXISTING MEMORY: if this memory corrects, replaces or updates one you just read, you MUST pass its id in `supersedes`. Writing a bare 'CORRECTION: ...' memory does NOT retire the old one — dedup will not catch it, because a correction is worded differently from what it corrects, and BOTH will keep being recalled as equally valid. Search first, then supersede.\n\nONE MEMORY PER SUBJECT: the reply lists memories already stored on the same subject. If one of them covers this, supersede it with the whole updated text instead of adding a second memory beside it.\n\nTEMPORARY FACTS: if something is only true for a while (a freeze, a leave period, a deadline, an 'as of now' restriction, a temporary workaround), pass `expires_in_days`; it is archived automatically once it lapses.\n\nNEVER SAVE: a question the user asked or a thing they looked into as if it were a fact about them (asking about X does not mean they use X); content from text they pasted but did not write (logs, tickets, PR comments, emails, docs); hypotheticals and one-off instructions for this conversation; secrets, tokens or account numbers.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -230,6 +230,12 @@ fn handle_tools_list() -> Value {
                         "project": {
                             "type": "string",
                             "description": "Optional scope override. \"global\" forces a global memory. An absolute git-root path scopes it to that project (e.g. /Users/byron/projects/personal/hearth). If omitted: type=user is always global; type=feedback/reference default global; type=project defaults to the project detected by the UserPromptSubmit hook (transcript-inferred), falling back to the server's startup cwd."
+                        },
+                        "expires_in_days": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 730,
+                            "description": "Optional: days this memory stays true. Once it lapses the memory is archived (reversible). Omit for lasting knowledge."
                         },
                         "supersedes": {
                             "type": "array",
@@ -554,6 +560,14 @@ fn tool_memory_add(args: Value) -> Result<String, String> {
         _ => Vec::new(),
     };
 
+    let expires_at = match args.get("expires_in_days").and_then(Value::as_f64) {
+        Some(days) if days >= 1.0 => {
+            Some(chrono::Utc::now().timestamp() + (days.min(MAX_EXPIRY_DAYS) * 86_400.0) as i64)
+        }
+        Some(_) => return Err("expires_in_days must be at least 1".to_string()),
+        None => None,
+    };
+
     // Resolve scope: user type is forced global; explicit override wins;
     // otherwise type-driven default with the hook-detected project (or server
     // startup cwd as fallback) as the source.
@@ -592,17 +606,67 @@ fn tool_memory_add(args: Value) -> Result<String, String> {
         project: project.clone(),
     })?;
 
+    if expires_at.is_some() {
+        memories::set_expiry(&memory.id, expires_at)?;
+    }
+
     let scope_label = match project.as_deref() {
         None => "global".to_string(),
         Some(p) => format!("project: {}", p),
     };
+    let expiry_label = expires_at
+        .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+        .map(|d| format!("\nexpires: {}", d.format("%Y-%m-%d")))
+        .unwrap_or_default();
 
     let supersede_report = apply_supersedes(&memory.id, &supersedes);
 
+    let mut exclude: Vec<&str> = vec![memory.id.as_str()];
+    exclude.extend(supersedes.iter().map(String::as_str));
+    let same_subject = crate::store::with_conn(|conn| {
+        memories::same_subject_with_conn(
+            conn,
+            &format!("{} {} {}", memory.title, memory.description, memory.content),
+            project.as_deref(),
+            &exclude,
+            SAME_SUBJECT_MIN_SIMILARITY,
+            SAME_SUBJECT_SHOWN,
+        )
+    })
+    .unwrap_or_default();
+
     Ok(format!(
-        "Memory saved ({}).\nid: {}\ntitle: {}{}",
-        scope_label, memory.id, memory.title, supersede_report
+        "Memory saved ({}).\nid: {}\ntitle: {}{}{}{}",
+        scope_label,
+        memory.id,
+        memory.title,
+        expiry_label,
+        supersede_report,
+        render_same_subject(&memory.id, &same_subject)
     ))
+}
+
+const MAX_EXPIRY_DAYS: f64 = 730.0;
+const SAME_SUBJECT_MIN_SIMILARITY: f64 = 0.25;
+const SAME_SUBJECT_SHOWN: usize = 3;
+
+/// Memories already stored on the subject just saved, so the caller can fold
+/// them into one instead of leaving several side by side.
+fn render_same_subject(new_id: &str, matches: &[(memories::Memory, f64)]) -> String {
+    if matches.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n\nAlready stored on the same subject — if the new memory replaces or restates one of these, \
+         call memory_add once more with the whole merged text and supersedes: [the new id and that id]:",
+    );
+    for (m, _) in matches {
+        let summary = if m.description.trim().is_empty() { m.content.as_str() } else { m.description.as_str() };
+        let summary: String = summary.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(160).collect();
+        out.push_str(&format!("\n  - {} — {} [id: {}]", m.title, summary, m.id));
+    }
+    out.push_str(&format!("\nThe new memory's id is {}. Leave them alone if they are different subjects.", new_id));
+    out
 }
 
 /// Link `new_id` to each superseded memory and archive the old ones.
@@ -659,12 +723,18 @@ fn apply_supersedes(new_id: &str, supersedes: &[String]) -> String {
 fn tool_memory_get(args: Value) -> Result<String, String> {
     let id = args.get("id").and_then(Value::as_str).ok_or("id required")?;
     let memory = memories::get(id)?.ok_or_else(|| format!("Memory {} not found", id))?;
+    let expiry = memory
+        .expires_at
+        .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+        .map(|d| format!("\n**Expires:** {}", d.format("%Y-%m-%d")))
+        .unwrap_or_default();
     Ok(format!(
-        "# {}\n\n**Topic:** {}\n**Type:** {}\n**Description:** {}\n\n{}",
+        "# {}\n\n**Topic:** {}\n**Type:** {}\n**Description:** {}{}\n\n{}",
         memory.title,
         memory.topic.as_deref().unwrap_or("untopiced"),
         memory.memory_type.as_deref().unwrap_or("unknown"),
         memory.description,
+        expiry,
         memory.content
     ))
 }
@@ -853,4 +923,90 @@ fn tool_memory_list(args: Value) -> Result<String, String> {
     }
 
     Ok(out)
+}
+
+#[cfg(test)]
+mod memory_add_tests {
+    use super::*;
+
+    #[test]
+    fn expiring_memory_is_saved_with_its_expiry() {
+        let _store = crate::store::test_store();
+        let out = tool_memory_add(json!({
+            "title": "Dunnart release freeze over the holidays",
+            "content": "No dunnart production releases until the holiday freeze lifts",
+            "type": "feedback",
+            "project": "global",
+            "expires_in_days": 10
+        }))
+        .unwrap();
+        assert!(out.contains("expires: "));
+
+        let id = out.lines().find_map(|l| l.strip_prefix("id: ")).unwrap();
+        let saved = memories::get(id).unwrap().unwrap();
+        let days = (saved.expires_at.unwrap() - saved.created_at) as f64 / 86_400.0;
+        assert!((days - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn expiry_below_one_day_is_refused() {
+        let _store = crate::store::test_store();
+        let err = tool_memory_add(json!({
+            "title": "Dunnart zero-day note",
+            "content": "Dunnart note that should not be saved",
+            "type": "feedback",
+            "project": "global",
+            "expires_in_days": 0
+        }))
+        .unwrap_err();
+        assert!(err.contains("expires_in_days"));
+    }
+
+    #[test]
+    fn saving_lists_what_is_already_stored_on_the_same_subject() {
+        let _store = crate::store::test_store();
+        let first = tool_memory_add(json!({
+            "title": "Bandicoot staging Postgres port",
+            "content": "Bandicoot staging Postgres listens on port 5433 on the Hetzner server",
+            "type": "reference",
+            "project": "global"
+        }))
+        .unwrap();
+        let first_id = first.lines().find_map(|l| l.strip_prefix("id: ")).unwrap().to_string();
+
+        let second = tool_memory_add(json!({
+            "title": "Bandicoot staging Postgres moved port",
+            "content": "Bandicoot staging Postgres now listens on port 5434 on the Hetzner server after the move",
+            "type": "reference",
+            "project": "global"
+        }))
+        .unwrap();
+
+        assert!(second.contains("Already stored on the same subject"));
+        assert!(second.contains(&first_id));
+    }
+
+    #[test]
+    fn superseded_memories_are_not_listed_as_same_subject() {
+        let _store = crate::store::test_store();
+        let first = tool_memory_add(json!({
+            "title": "Bettong deploy target host",
+            "content": "Bettong deploys to the old Hetzner host via Kamal",
+            "type": "reference",
+            "project": "global"
+        }))
+        .unwrap();
+        let first_id = first.lines().find_map(|l| l.strip_prefix("id: ")).unwrap().to_string();
+
+        let second = tool_memory_add(json!({
+            "title": "Bettong deploy target host changed",
+            "content": "Bettong now deploys to the new Hetzner host via Kamal",
+            "type": "reference",
+            "project": "global",
+            "supersedes": [first_id.clone()]
+        }))
+        .unwrap();
+
+        assert!(!second.contains("Already stored on the same subject"));
+    }
 }

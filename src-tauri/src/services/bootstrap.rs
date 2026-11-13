@@ -15,7 +15,9 @@ For procedural questions (how to deploy/test/commit/release X), cite the memory 
 
 Save immediately when you observe any of: a user correction, a stated preference or convention, a non-obvious project fact, a debugging gotcha and its fix, an architecture decision with its rationale, or a workflow discovery. A typical session produces 3–10 memories. Self-check before commits and at session end.
 
-Don't save status snapshots: progress logs, "X is done/shipped/merged", handoff notes, what is left to do, or a ticket's current state. They go stale within days and the organizer archives them. Save the lasting lesson behind the work instead.
+Don't save status snapshots: progress logs, "X is done/shipped/merged", handoff notes, what is left to do, or a ticket's current state. They go stale within days and the organizer archives them. Save the lasting lesson behind the work instead. If a fact is only true for a while (a freeze, a leave period, an "as of now" restriction), pass `expires_in_days` so it is archived when it lapses.
+
+One memory per subject: when `memory_add` lists memories already stored on the same subject, fold them into one with `supersedes` instead of leaving several side by side. Never save a question the user asked as a fact about them, or content from text they pasted but did not write.
 
 Good memories are specific, terse, and self-contained. Prefer several small focused memories over one big one. Set `type` to `user` (about the human), `feedback` (rules/conventions), `project` (project-specific facts), or `reference` (external resources). Skip `topic` — it's auto-classified.
 
@@ -239,8 +241,40 @@ pub fn remove_claude_md_section_in(config_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Install or remove the UserPromptSubmit hook that auto-injects relevant
-/// memories into Claude's context on every message. Idempotent.
+/// Claude Code events the memory hook binary answers: per-prompt recall, and
+/// the user profile at the start of a session and after compaction.
+const MEMORY_HOOK_EVENTS: [&str; 2] = ["UserPromptSubmit", "SessionStart"];
+
+fn is_memory_hook_entry(entry: &serde_json::Value) -> bool {
+    entry
+        .get("hooks")
+        .and_then(|h| h.as_array())
+        .map(|arr| {
+            arr.iter().any(|h| {
+                h.get("command")
+                    .and_then(|c| c.as_str())
+                    .map(|c| c.contains("claude-memory-manager") && c.contains("--hook"))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn has_memory_hook_for(settings: &serde_json::Value, event: &str) -> bool {
+    settings
+        .get("hooks")
+        .and_then(|h| h.get(event))
+        .and_then(|e| e.as_array())
+        .map(|arr| arr.iter().any(is_memory_hook_entry))
+        .unwrap_or(false)
+}
+
+fn read_settings(config_dir: &Path) -> Option<serde_json::Value> {
+    let content = std::fs::read_to_string(config_dir.join("settings.json")).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+/// Install the memory hook for every event in `MEMORY_HOOK_EVENTS`. Idempotent.
 pub fn ensure_memory_hook_in(config_dir: &Path, binary_path: &str) -> Result<(), String> {
     let path = config_dir.join("settings.json");
 
@@ -258,7 +292,6 @@ pub fn ensure_memory_hook_in(config_dir: &Path, binary_path: &str) -> Result<(),
         settings = serde_json::json!({});
     }
 
-    // Build hook command — escape the binary path for shell
     let hook_command = format!("{} --hook", shell_quote(binary_path));
 
     let obj = settings.as_object_mut().unwrap();
@@ -268,44 +301,28 @@ pub fn ensure_memory_hook_in(config_dir: &Path, binary_path: &str) -> Result<(),
     if !hooks.is_object() {
         *hooks = serde_json::json!({});
     }
-
     let hooks_obj = hooks.as_object_mut().unwrap();
-    let event_list = hooks_obj
-        .entry("UserPromptSubmit".to_string())
-        .or_insert_with(|| serde_json::json!([]));
-    if !event_list.is_array() {
-        *event_list = serde_json::json!([]);
+
+    for event in MEMORY_HOOK_EVENTS {
+        let event_list = hooks_obj
+            .entry(event.to_string())
+            .or_insert_with(|| serde_json::json!([]));
+        if !event_list.is_array() {
+            *event_list = serde_json::json!([]);
+        }
+        let event_array = event_list.as_array_mut().unwrap();
+        event_array.retain(|entry| !is_memory_hook_entry(entry));
+        event_array.push(serde_json::json!({
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": hook_command,
+                    "timeout": 10
+                }
+            ]
+        }));
     }
-
-    let event_array = event_list.as_array_mut().unwrap();
-
-    // Remove any existing claude-memory-manager hook (identified by --hook in the command)
-    event_array.retain(|entry| {
-        !entry
-            .get("hooks")
-            .and_then(|h| h.as_array())
-            .map(|arr| {
-                arr.iter().any(|h| {
-                    h.get("command")
-                        .and_then(|c| c.as_str())
-                        .map(|c| c.contains("claude-memory-manager") && c.contains("--hook"))
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false)
-    });
-
-    // Add our hook entry
-    event_array.push(serde_json::json!({
-        "matcher": "",
-        "hooks": [
-            {
-                "type": "command",
-                "command": hook_command,
-                "timeout": 10
-            }
-        ]
-    }));
 
     let output =
         serde_json::to_string_pretty(&settings).map_err(|e| format!("serialize: {}", e))?;
@@ -314,38 +331,22 @@ pub fn ensure_memory_hook_in(config_dir: &Path, binary_path: &str) -> Result<(),
     Ok(())
 }
 
-/// Remove the memory hook from a config dir's settings.json.
+/// Remove the memory hook from every event in a config dir's settings.json.
 pub fn remove_memory_hook_in(config_dir: &Path) -> Result<(), String> {
     let path = config_dir.join("settings.json");
-    let existing = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => return Ok(()),
+    let mut settings = match read_settings(config_dir) {
+        Some(v) => v,
+        None => return Ok(()),
     };
 
-    let mut settings: serde_json::Value = match serde_json::from_str(&existing) {
-        Ok(v) => v,
-        Err(_) => return Ok(()),
-    };
-
-    if let Some(event_array) = settings
-        .get_mut("hooks")
-        .and_then(|h| h.get_mut("UserPromptSubmit"))
-        .and_then(|e| e.as_array_mut())
-    {
-        event_array.retain(|entry| {
-            !entry
-                .get("hooks")
-                .and_then(|h| h.as_array())
-                .map(|arr| {
-                    arr.iter().any(|h| {
-                        h.get("command")
-                            .and_then(|c| c.as_str())
-                            .map(|c| c.contains("claude-memory-manager") && c.contains("--hook"))
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false)
-        });
+    for event in MEMORY_HOOK_EVENTS {
+        if let Some(event_array) = settings
+            .get_mut("hooks")
+            .and_then(|h| h.get_mut(event))
+            .and_then(|e| e.as_array_mut())
+        {
+            event_array.retain(|entry| !is_memory_hook_entry(entry));
+        }
     }
 
     let output = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
@@ -353,39 +354,20 @@ pub fn remove_memory_hook_in(config_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Check whether the memory hook is installed in a config dir.
+/// Whether the per-prompt memory hook is installed in a config dir.
 pub fn is_hook_installed_in(config_dir: &Path) -> bool {
-    let path = config_dir.join("settings.json");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
+    read_settings(config_dir)
+        .map(|s| has_memory_hook_for(&s, "UserPromptSubmit"))
+        .unwrap_or(false)
+}
 
-    let json: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-
-    json.get("hooks")
-        .and_then(|h| h.get("UserPromptSubmit"))
-        .and_then(|e| e.as_array())
-        .map(|arr| {
-            arr.iter().any(|entry| {
-                entry
-                    .get("hooks")
-                    .and_then(|h| h.as_array())
-                    .map(|inner| {
-                        inner.iter().any(|h| {
-                            h.get("command")
-                                .and_then(|c| c.as_str())
-                                .map(|c| {
-                                    c.contains("claude-memory-manager") && c.contains("--hook")
-                                })
-                                .unwrap_or(false)
-                        })
-                    })
-                    .unwrap_or(false)
-            })
+/// Installed before the SessionStart profile existed: has the per-prompt hook
+/// but not every event, so an upgrade should reinstall it.
+pub fn memory_hook_needs_upgrade_in(config_dir: &Path) -> bool {
+    read_settings(config_dir)
+        .map(|s| {
+            has_memory_hook_for(&s, "UserPromptSubmit")
+                && MEMORY_HOOK_EVENTS.iter().any(|e| !has_memory_hook_for(&s, e))
         })
         .unwrap_or(false)
 }
@@ -659,5 +641,74 @@ mod tests {
         assert!(out.contains("Some instructions"));
         assert!(out.contains(BEGIN_MARKER));
         assert!(out.contains(END_MARKER));
+    }
+}
+
+#[cfg(test)]
+mod memory_hook_tests {
+    use super::*;
+
+    fn temp_config_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("cmm-hook-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn settings_of(dir: &Path) -> serde_json::Value {
+        read_settings(dir).unwrap()
+    }
+
+    #[test]
+    fn install_registers_prompt_and_session_start_and_keeps_other_hooks() {
+        let dir = temp_config_dir();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"echo hi"}]}]}}"#,
+        )
+        .unwrap();
+
+        ensure_memory_hook_in(&dir, "/Applications/claude-memory-manager").unwrap();
+        ensure_memory_hook_in(&dir, "/Applications/claude-memory-manager").unwrap();
+
+        let s = settings_of(&dir);
+        assert!(has_memory_hook_for(&s, "UserPromptSubmit"));
+        assert!(has_memory_hook_for(&s, "SessionStart"));
+        assert_eq!(s["hooks"]["SessionStart"].as_array().unwrap().len(), 2);
+        assert_eq!(s["hooks"]["UserPromptSubmit"].as_array().unwrap().len(), 1);
+        assert!(!memory_hook_needs_upgrade_in(&dir));
+    }
+
+    #[test]
+    fn an_install_from_before_session_start_needs_upgrade() {
+        let dir = temp_config_dir();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"/x/claude-memory-manager --hook"}]}]}}"#,
+        )
+        .unwrap();
+        assert!(is_hook_installed_in(&dir));
+        assert!(memory_hook_needs_upgrade_in(&dir));
+
+        let other = temp_config_dir();
+        assert!(!memory_hook_needs_upgrade_in(&other));
+    }
+
+    #[test]
+    fn remove_clears_every_event_but_leaves_other_hooks() {
+        let dir = temp_config_dir();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"echo hi"}]}]}}"#,
+        )
+        .unwrap();
+        ensure_memory_hook_in(&dir, "/Applications/claude-memory-manager").unwrap();
+
+        remove_memory_hook_in(&dir).unwrap();
+
+        let s = settings_of(&dir);
+        assert!(!has_memory_hook_for(&s, "UserPromptSubmit"));
+        assert!(!has_memory_hook_for(&s, "SessionStart"));
+        assert_eq!(s["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
+        assert!(!is_hook_installed_in(&dir));
     }
 }

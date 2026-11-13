@@ -33,7 +33,6 @@ struct HookEvent {
     cwd: String,
     #[serde(default)]
     transcript_path: String,
-    #[allow(dead_code)]
     #[serde(default)]
     hook_event_name: String,
 }
@@ -70,6 +69,10 @@ pub fn run() -> Result<(), String> {
     let event: HookEvent = serde_json::from_str(&input)
         .map_err(|e| format!("parse hook event: {}", e))?;
 
+    if event.hook_event_name == "SessionStart" {
+        return run_session_start(timer);
+    }
+
     // Don't bother with very short prompts ("ok", "yes", etc.)
     if event.prompt.trim().len() < MIN_PROMPT_LEN {
         return Ok(());
@@ -81,6 +84,9 @@ pub fn run() -> Result<(), String> {
     // rather than spinning up a pool with a WAL checkpoint on every invoke.
     let conn = store::open_hook_connection().map_err(|e| format!("store init: {}", e))?;
     timer.mark("open_db");
+
+    let _ = memories::archive_expired_with_conn(&conn, chrono::Utc::now().timestamp());
+    timer.mark("archive_expired");
 
     // Detect active project once per invocation — reused for retrieval and save.
     let active_project = detect_active_project(&event);
@@ -257,6 +263,65 @@ pub fn run() -> Result<(), String> {
     );
 
     Ok(())
+}
+
+const MAX_PROFILE_ENTRIES: u32 = 20;
+const MAX_PROFILE_LINE_CHARS: usize = 400;
+
+/// SessionStart (startup, resume, clear and after compaction): put the user's
+/// profile in front of Claude once, so facts about them inform answers whose
+/// wording shares nothing with those facts.
+fn run_session_start(mut timer: perf::Timer) -> Result<(), String> {
+    let conn = store::open_hook_connection().map_err(|e| format!("store init: {}", e))?;
+    let now = chrono::Utc::now().timestamp();
+    let _ = memories::archive_expired_with_conn(&conn, now);
+    let profile = memories::list_profile_with_conn(&conn, MAX_PROFILE_ENTRIES)?;
+    timer.mark("profile");
+
+    let out = render_profile(&profile);
+    if !out.is_empty() {
+        let stdout = io::stdout();
+        let mut handle = stdout.lock();
+        handle
+            .write_all(out.as_bytes())
+            .map_err(|e| format!("write stdout: {}", e))?;
+        handle.flush().map_err(|e| format!("flush: {}", e))?;
+    }
+    timer.finish(
+        "hook",
+        "SessionStart",
+        serde_json::json!({ "profile_entries": profile.len(), "output_bytes": out.len() }),
+    );
+    Ok(())
+}
+
+fn render_profile(entries: &[memories::Memory]) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "<user-profile>\nStanding facts about the user, shown at the start of every session. \
+         Let them inform every answer, not only ones that mention them. \
+         Full text: memory_get(id). If one is out of date, memory_add the correction with supersedes: [id].\n\n",
+    );
+    for m in entries {
+        let body = if m.content.trim().is_empty() { &m.description } else { &m.content };
+        let summary = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let until = m
+            .expires_at
+            .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+            .map(|d| format!(" (until {})", d.format("%Y-%m-%d")))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "- {} — {}{} [id: {}]\n",
+            m.title.trim(),
+            truncate_chars(&summary, MAX_PROFILE_LINE_CHARS),
+            until,
+            m.id
+        ));
+    }
+    out.push_str("</user-profile>\n");
+    out
 }
 
 const FTS_OVERFETCH: u32 = 10;
@@ -820,6 +885,45 @@ fn truncate_chars(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn profile_entry(title: &str, description: &str, content: &str, expires_at: Option<i64>) -> memories::Memory {
+        memories::Memory {
+            id: format!("id-{}", title.len()),
+            title: title.to_string(),
+            description: description.to_string(),
+            content: content.to_string(),
+            memory_type: Some("user".to_string()),
+            topic: None,
+            source: None,
+            project: None,
+            created_at: 0,
+            updated_at: 0,
+            access_count: 0,
+            archived_at: None,
+            expires_at,
+        }
+    }
+
+    #[test]
+    fn profile_shows_one_line_per_fact_with_id_and_expiry() {
+        let entries = vec![
+            profile_entry("Citizenship", "Where they are from", "South African citizen,\n  Danish residence permit", None),
+            profile_entry("No leave", "Leave rule", "Cannot take leave around Black Week", Some(1_798_761_600)),
+            profile_entry("Pointer", "Only a description", "", None),
+        ];
+        let out = render_profile(&entries);
+        assert!(out.starts_with("<user-profile>"));
+        assert!(out.contains("- Citizenship — South African citizen, Danish residence permit [id: id-11]"));
+        assert!(out.contains("- No leave — Cannot take leave around Black Week (until 2027-01-01) [id: id-8]"));
+        assert!(out.contains("- Pointer — Only a description [id: id-7]"));
+        assert!(!out.contains("Where they are from"));
+        assert!(out.trim_end().ends_with("</user-profile>"));
+    }
+
+    #[test]
+    fn empty_profile_prints_nothing() {
+        assert_eq!(render_profile(&[]), "");
+    }
 
     #[test]
     fn remember_refuses_an_archived_snapshot_and_says_so() {
