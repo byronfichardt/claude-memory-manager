@@ -172,6 +172,32 @@ pub fn pending_conflict_count() -> Result<i64, String> {
     })
 }
 
+/// Pending conflicts not yet explained: their `content` holds no check result.
+pub fn unexplained_conflicts() -> Result<Vec<DreamProposal>, String> {
+    with_conn(|conn| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT * FROM dream_proposals WHERE status = 'pending' AND proposal_type = 'conflict' AND content = '' ORDER BY created_at",
+            )
+            .map_err(|e| format!("prepare unexplained_conflicts: {}", e))?;
+        let rows = stmt
+            .query_map([], row_to_proposal)
+            .map_err(|e| format!("unexplained_conflicts: {}", e))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    })
+}
+
+pub fn set_content(id: &str, content: &str) -> Result<(), String> {
+    with_conn(|conn| {
+        conn.execute(
+            "UPDATE dream_proposals SET content = ?1 WHERE id = ?2",
+            params![content, id],
+        )
+        .map_err(|e| format!("set proposal content: {}", e))?;
+        Ok(())
+    })
+}
+
 pub fn reopen_conflict(id: &str) -> Result<(), String> {
     with_conn(|conn| {
         conn.execute(

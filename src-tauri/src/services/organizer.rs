@@ -111,6 +111,7 @@ const DEDUP_MIN_TOPIC_SIZE: usize = 2;
 const CONSOLIDATE_SAMPLE_PER_TOPIC: usize = 6;
 const RELATE_BATCH_SIZE: usize = 20;
 const RELATE_MAX_CONTENT: usize = 400;
+const CONFLICT_CHECK_MAX_CONTENT: usize = 2000;
 /// `relates-to` edges below this weight are pruned. Co-access seeds edges at
 /// 0.1 and strengthens by 0.05 per repeat, so 0.2 keeps only pairs co-retrieved
 /// at least ~3 times and drops one-off coincidences.
@@ -178,6 +179,18 @@ Rules:
 
 Respond with ONLY valid JSON (no prose, no markdown fences):
 {"edges": [{"source_id": "id1", "target_id": "id2", "edge_type": "relates-to"}]}"#;
+
+const CONFLICT_CHECK_SYSTEM: &str = r#"Two memories from a coding assistant's memory store were flagged as contradicting each other. A person must decide which one is right, and most of them are too technical to compare quickly.
+
+Decide whether they truly conflict: following one would mean breaking the other. They do NOT truly conflict when one is a workaround or detail for a case the other discourages, when they cover different situations or projects, or when one simply adds to the other.
+
+Write for a busy reader in plain language, no jargon you can avoid, each line under 25 words:
+- "a_says": what memory A tells you to do or believe.
+- "b_says": what memory B tells you to do or believe.
+- "disagreement": if they truly conflict, the exact point they disagree on; if not, why both can stand.
+
+Respond with ONLY valid JSON (no prose, no markdown fences):
+{"real_conflict": true, "a_says": "...", "b_says": "...", "disagreement": "..."}"#;
 
 const SPLIT_SYSTEM: &str = r#"You evaluate whether a topic bucket has grown too broad and should be split into narrower sub-topics.
 
@@ -447,6 +460,10 @@ pub async fn run_full_pass(handle: Option<AppHandle>, force: bool) -> Result<Org
     }
 
     settle_and_count_conflicts(&mut report);
+    emit(h, "conflicts", "Explaining contradicting memories", 0, 1);
+    if let Err(e) = explain_pending_conflicts(&client).await {
+        report.errors.push(format!("explain conflicts: {}", e));
+    }
 
     // Phase 5: prune the low-signal `relates-to` graph. Co-access wiring adds
     // edges on every prompt, so this bounded sweep every pass stops the graph
@@ -1680,6 +1697,52 @@ fn settle_conflicts(report: &mut OrganizerReport) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Deserialize)]
+struct AiConflictCheck {
+    real_conflict: bool,
+    a_says: String,
+    b_says: String,
+    disagreement: String,
+}
+
+/// Ask Claude what each side of a pending conflict says and whether they truly
+/// clash, and store the answer on the proposal for the Dreaming card.
+pub async fn explain_pending_conflicts(client: &ClaudeClient) -> Result<usize, String> {
+    let mut explained = 0;
+    for proposal in dreams::unexplained_conflicts()? {
+        let (Some(a_id), Some(b_id)) = (&proposal.related_memory_id, &proposal.target_memory_id) else {
+            continue;
+        };
+        let (Some(a), Some(b)) = (memories::get(a_id)?, memories::get(b_id)?) else {
+            continue;
+        };
+        let describe = |label: &str, m: &memories::Memory| {
+            format!(
+                "Memory {}:\ntitle: {}\nkind: {}\nproject: {}\ndescription: {}\ncontent: {}\n\n",
+                label,
+                m.title,
+                m.memory_type.as_deref().unwrap_or("unknown"),
+                m.project.as_deref().unwrap_or("global"),
+                m.description,
+                truncate(&m.content, CONFLICT_CHECK_MAX_CONTENT),
+            )
+        };
+        let prompt = format!("{}{}", describe("A", &a), describe("B", &b));
+        let response = client.analyze(CONFLICT_CHECK_SYSTEM, &prompt).await?;
+        let json = extract_json(&response.text);
+        let check: AiConflictCheck = serde_json::from_str(json)
+            .map_err(|e| format!("parse conflict check: {} (raw: {})", e, truncate(json, 200)))?;
+        let stored = serde_json::json!({
+            "real_conflict": check.real_conflict,
+            "disagreement": check.disagreement,
+            "says": { a.id.clone(): check.a_says, b.id.clone(): check.b_says },
+        });
+        dreams::set_content(&proposal.id, &stored.to_string())?;
+        explained += 1;
+    }
+    Ok(explained)
+}
+
 fn save_conflict_proposal(
     a: &memories::Memory,
     b: &memories::Memory,
@@ -2035,6 +2098,10 @@ mod tests {
 
         dreams::save_proposals(&[]).unwrap();
         let disputed = dreams::list_pending().unwrap().pop().expect("dream run kept the dispute");
+        let unexplained: Vec<String> = dreams::unexplained_conflicts().unwrap().into_iter().map(|p| p.id).collect();
+        assert_eq!(unexplained, vec![disputed.id.clone()]);
+        dreams::set_content(&disputed.id, r#"{"real_conflict":true}"#).unwrap();
+        assert!(dreams::unexplained_conflicts().unwrap().is_empty());
         assert!(resolve_conflict(&disputed.id, "not-a-side").is_err());
         resolve_conflict(&disputed.id, &old_rule.id).unwrap();
         assert!(archived(&new_note));
