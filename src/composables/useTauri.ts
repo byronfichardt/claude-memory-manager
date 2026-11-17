@@ -149,5 +149,6 @@ export function useTauri() {
     dismissDreamProposal: (id: string) => invoke<void>("dismiss_dream_proposal", { id }),
     resolveConflictProposal: (id: string, keepId: string) =>
       invoke<void>("resolve_conflict_proposal", { id, keepId }),
+    explainConflictProposals: () => invoke<number>("explain_conflict_proposals"),
   };
 }

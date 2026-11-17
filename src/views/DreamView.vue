@@ -8,6 +8,14 @@ const app = useAppStore();
 const tauri = useTauri();
 const expanded = ref<Set<string>>(new Set());
 const conflictMemories = ref<Record<string, Memory | null>>({});
+const explaining = ref(false);
+const explainError = ref<string | null>(null);
+
+interface ConflictCheck {
+  real_conflict: boolean;
+  disagreement: string;
+  says: Record<string, string>;
+}
 
 onMounted(() => {
   // Reload proposals when entering the view (catches proposals from a run
@@ -85,7 +93,69 @@ const conflictProposals = computed(() =>
   app.dreamProposals.filter((p) => p.proposal_type === "conflict"),
 );
 
-watch(conflictProposals, loadConflictMemories, { immediate: true });
+watch(conflictProposals, (proposals) => {
+  loadConflictMemories(proposals);
+  explainConflicts(proposals);
+}, { immediate: true });
+
+async function explainConflicts(proposals: DreamProposal[]) {
+  if (explaining.value || explainError.value || !proposals.some((p) => !p.content)) return;
+  explaining.value = true;
+  try {
+    await tauri.explainConflictProposals();
+    await app.loadDreamProposals();
+  } catch (e) {
+    explainError.value = String(e);
+  } finally {
+    explaining.value = false;
+  }
+}
+
+function conflictCheck(p: DreamProposal): ConflictCheck | null {
+  if (!p.content) return null;
+  try {
+    return JSON.parse(p.content) as ConflictCheck;
+  } catch {
+    return null;
+  }
+}
+
+function newerSide(p: DreamProposal): string | null {
+  const [a, b] = conflictSides(p).map((id) => conflictMemories.value[id]);
+  if (!a || !b || a.created_at === b.created_at) return null;
+  return a.created_at > b.created_at ? a.id : b.id;
+}
+
+function sideLabel(p: DreamProposal, sideId: string): string {
+  return conflictSides(p)[0] === sideId ? "left" : "right";
+}
+
+const dateFormat = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric" });
+const relativeFormat = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+
+function formatDate(seconds: number): string {
+  return dateFormat.format(new Date(seconds * 1000));
+}
+
+function timeAgo(seconds: number): string {
+  const days = Math.round((seconds * 1000 - Date.now()) / 86_400_000);
+  if (Math.abs(days) < 1) return "today";
+  if (Math.abs(days) < 30) return relativeFormat.format(days, "day");
+  if (Math.abs(days) < 365) return relativeFormat.format(Math.round(days / 30), "month");
+  return relativeFormat.format(Math.round(days / 365), "year");
+}
+
+function sameDay(a: number, b: number): boolean {
+  return formatDate(a) === formatDate(b);
+}
+
+function scopeLabel(m: Memory): string {
+  return m.project ? m.project.split("/").filter(Boolean).pop() ?? m.project : "all projects";
+}
+
+function summaryOf(m: Memory): string {
+  return m.description || m.content.split(/(?<=[.!?])\s/)[0];
+}
 
 const memoryTypeLabel: Record<string, string> = {
   feedback: "feedback",
@@ -206,30 +276,67 @@ const memoryTypeLabel: Record<string, string> = {
         </h2>
         <div class="proposal-list">
           <div v-for="p in conflictProposals" :key="p.id" class="proposal-card">
-            <div class="card-reasoning">{{ p.reasoning }} Keep the one that is right; the other is archived and can be restored with Undo.</div>
-            <div class="conflict-sides">
-              <div v-for="sideId in conflictSides(p)" :key="sideId" class="conflict-side">
-                <template v-if="conflictMemories[sideId]">
-                  <div class="card-meta">
-                    <span
-                      v-if="conflictMemories[sideId]!.memory_type"
-                      class="type-badge"
-                      :class="`type-${conflictMemories[sideId]!.memory_type}`"
-                    >
-                      {{ conflictMemories[sideId]!.memory_type }}
-                    </span>
-                    <span class="card-title">{{ conflictMemories[sideId]!.title }}</span>
-                  </div>
-                  <div class="card-content side-content">{{ conflictMemories[sideId]!.content }}</div>
-                  <button class="action-btn apply-btn" @click="keep(p, sideId)">Keep this one</button>
-                </template>
-                <div v-else-if="sideId in conflictMemories" class="side-missing">Memory no longer exists</div>
-                <div v-else class="side-missing">Loading…</div>
+            <template v-for="check in [conflictCheck(p)]" :key="p.id + '-check'">
+              <div v-if="check" class="conflict-headline" :class="{ 'not-real': !check.real_conflict }">
+                <span class="headline-label">{{ check.real_conflict ? "They disagree on" : "Probably not a real conflict" }}</span>
+                {{ check.disagreement }}
               </div>
-            </div>
-            <div class="card-actions">
-              <button class="action-btn dismiss-btn" @click="dismiss(p)">Keep both</button>
-            </div>
+              <div v-else-if="explaining" class="conflict-headline pending">Working out what these two disagree on…</div>
+              <div v-else-if="explainError" class="conflict-headline pending">Couldn't explain this conflict: {{ explainError }}</div>
+
+              <div class="conflict-sides">
+                <div v-for="sideId in conflictSides(p)" :key="sideId" class="conflict-side">
+                  <template v-if="conflictMemories[sideId]">
+                    <div class="side-badges">
+                      <span
+                        v-if="conflictMemories[sideId]!.memory_type"
+                        class="type-badge"
+                        :class="`type-${conflictMemories[sideId]!.memory_type}`"
+                      >
+                        {{ conflictMemories[sideId]!.memory_type === "feedback" ? "standing rule" : conflictMemories[sideId]!.memory_type }}
+                      </span>
+                      <span class="scope-badge">{{ scopeLabel(conflictMemories[sideId]!) }}</span>
+                      <span v-if="newerSide(p) === sideId" class="newer-badge">Newer</span>
+                    </div>
+                    <div class="side-date">
+                      Saved {{ formatDate(conflictMemories[sideId]!.created_at) }} · {{ timeAgo(conflictMemories[sideId]!.created_at) }}
+                      <template v-if="!sameDay(conflictMemories[sideId]!.created_at, conflictMemories[sideId]!.updated_at)">
+                        · updated {{ timeAgo(conflictMemories[sideId]!.updated_at) }}
+                      </template>
+                      · recalled {{ conflictMemories[sideId]!.access_count }}×
+                    </div>
+                    <span class="card-title">{{ conflictMemories[sideId]!.title }}</span>
+                    <div v-if="check?.says?.[sideId]" class="side-says">
+                      <span class="says-label">Says:</span> {{ check.says[sideId] }}
+                    </div>
+                    <div v-else class="side-summary">{{ summaryOf(conflictMemories[sideId]!) }}</div>
+                    <button class="text-toggle" @click="toggleExpanded(`${p.id}:${sideId}`)">
+                      {{ expanded.has(`${p.id}:${sideId}`) ? "Hide full text" : "Show full text" }}
+                    </button>
+                    <div v-if="expanded.has(`${p.id}:${sideId}`)" class="card-content side-content">{{ conflictMemories[sideId]!.content }}</div>
+                    <button
+                      class="action-btn"
+                      :class="check && !check.real_conflict ? 'dismiss-btn' : 'apply-btn'"
+                      @click="keep(p, sideId)"
+                    >
+                      Keep {{ sideLabel(p, sideId) }}, archive {{ sideLabel(p, sideId) === "left" ? "right" : "left" }}
+                    </button>
+                  </template>
+                  <div v-else-if="sideId in conflictMemories" class="side-missing">Memory no longer exists</div>
+                  <div v-else class="side-missing">Loading…</div>
+                </div>
+              </div>
+              <div class="card-actions">
+                <button
+                  class="action-btn"
+                  :class="check && !check.real_conflict ? 'apply-btn' : 'dismiss-btn'"
+                  @click="dismiss(p)"
+                >
+                  Keep both
+                </button>
+                <span class="conflict-footnote">{{ p.reasoning }} The one you don't keep is archived and can be restored with Undo.</span>
+              </div>
+            </template>
           </div>
         </div>
       </section>
@@ -613,5 +720,44 @@ const memoryTypeLabel: Record<string, string> = {
 }
 .conflict-side .action-btn { align-self: flex-start; margin-top: auto; }
 .side-content { max-height: 10rem; overflow-y: auto; }
+.conflict-headline {
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: var(--color-text-primary);
+  padding: 0.625rem 0.75rem;
+  border-left: 3px solid #e57373;
+  background: color-mix(in srgb, #e57373 8%, transparent);
+  border-radius: 0.25rem;
+}
+.conflict-headline.not-real {
+  border-left-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+}
+.conflict-headline.pending { border-left-color: var(--color-border); background: none; color: var(--color-text-muted); }
+.headline-label { display: block; font-size: 0.6875rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--color-text-muted); margin-bottom: 0.125rem; }
+.side-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 0.375rem; }
+.scope-badge, .newer-badge {
+  font-size: 0.6875rem;
+  padding: 0.125rem 0.4375rem;
+  border-radius: 0.25rem;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+}
+.newer-badge { color: var(--color-accent); border-color: color-mix(in srgb, var(--color-accent) 40%, transparent); font-weight: 600; }
+.side-date { font-size: 0.75rem; color: var(--color-text-muted); }
+.side-says, .side-summary { font-size: 0.8125rem; line-height: 1.5; color: var(--color-text-primary); }
+.says-label { color: var(--color-text-muted); font-weight: 600; }
+.text-toggle {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  text-decoration: underline;
+}
+.text-toggle:hover { color: var(--color-text-primary); }
+.conflict-footnote { font-size: 0.75rem; color: var(--color-text-muted); align-self: center; }
 .side-missing { font-size: 0.8125rem; color: var(--color-text-muted); }
 </style>

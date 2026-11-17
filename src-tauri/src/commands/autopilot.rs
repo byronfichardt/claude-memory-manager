@@ -686,6 +686,13 @@ pub async fn resolve_conflict_proposal(id: String, keep_id: String) -> Result<()
 }
 
 #[tauri::command]
+pub async fn explain_conflict_proposals() -> Result<usize, String> {
+    let client = crate::services::claude_api::ClaudeClient::new(None).await;
+    client.ensure_logged_in()?;
+    organizer::explain_pending_conflicts(&client).await
+}
+
+#[tauri::command]
 pub async fn dismiss_dream_proposal(id: String) -> Result<(), String> {
     blocking(move || dreams::set_status(&id, "dismissed")).await
 }
