@@ -1687,7 +1687,7 @@ fn settle_conflicts(report: &mut OrganizerReport) -> Result<(), String> {
                     save_conflict_proposal(
                         &a,
                         &b,
-                        "A newer project note disputes an older standing rule, so this needs your call.",
+                        "A newer note disputes an older standing rule, so this needs your call.",
                     )?;
                     report.conflicts_raised += 1;
                 }
@@ -2071,7 +2071,7 @@ mod tests {
         contradict(&card_a, &card_b);
         save_conflict_proposal(&card_a, &card_b, "raised by an older version").unwrap();
 
-        let old_note = new("Deploy with kubernetes", "project", Some("/p/a"), 100);
+        let old_note = new("Deploy with kubernetes", "project", None, 100);
         let new_rule = new("Deploy with kamal", "feedback", None, 200);
         contradict(&old_note, &new_rule);
 
@@ -2080,10 +2080,14 @@ mod tests {
         contradict(&here, &there);
 
         let old_rule = new("Never write to prod", "feedback", None, 100);
-        let new_note = new("Write to prod for this fix", "project", Some("/p/a"), 200);
+        let new_note = new("Write to prod for this fix", "project", None, 200);
         contradict(&old_rule, &new_note);
 
-        assert_eq!(settle(), (2, 2, 1, 1));
+        let global_rule = new("Ask before docker exec", "feedback", None, 100);
+        let local_note = new("Docker allowed for workers", "project", Some("/p/a"), 200);
+        contradict(&global_rule, &local_note);
+
+        assert_eq!(settle(), (2, 3, 1, 1));
         assert!(archived(&backlog_old) && !archived(&backlog_new));
         assert_eq!(status_of(&backlog_old, &backlog_new), "applied");
         assert!(!archived(&kept_a) && !archived(&kept_b));
@@ -2094,6 +2098,8 @@ mod tests {
         assert_eq!(edge_types(&old_note), vec!["supersedes"]);
         assert!(!archived(&here) && !archived(&there));
         assert!(edges::list_by_memory(&here.id).unwrap().is_empty());
+        assert!(!archived(&global_rule) && !archived(&local_note));
+        assert!(edges::list_by_memory(&local_note.id).unwrap().is_empty());
         assert_eq!(settle(), (0, 0, 0, 1));
 
         dreams::save_proposals(&[]).unwrap();
