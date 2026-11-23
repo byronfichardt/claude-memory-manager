@@ -1,11 +1,11 @@
 {
-  "version": "0.4.22",
-  "notes": "Conflict cards whose memories were already archived no longer show, and failed actions in the Dream view now show an error instead of doing nothing.",
-  "pub_date": "2026-11-23T08:22:55Z",
+  "version": "0.4.23",
+  "notes": "Project-scoped and global memories are no longer flagged as contradicting each other.",
+  "pub_date": "2026-11-23T10:21:36Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRGlNNStLWXkxWldHRVBCaTF6OXBhT25tTnMzcUQwNklSdzg5Y090em9OU1AzamtCQTFaZ25WZlR5QVRWL3JJVHhXSDZvcTF0MG9TamxuTlVRbFZVQUFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NDIyMTUxCWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKQlJka3RmbytNTkJOWXJVMUtPNjNQaG4yZklxSHUrNXgyaUkwMzAwZno1ZWFabUlZSmdLeElULys3UmVVbHdNOEJGT0huSlMwTUh4VVdlWWMzUmgxQWc9PQo=",
-      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.22/Claude.Memory.Manager.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRG9DWXRMUyszQU5xNjQzYk51bDZzZDdNNHptby9IaGRpc1JsSFhQcHRyUUc0NG4yVWFjTnBpb2VYUUlxd05NVVVkV3hjMk9BNlJJY3pmNTMxbGxWalF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NDI5Mjc4CWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKWTI0TnNFNmNTZGkvZ3g3S1VyUVBvY2F5TDgvSUpkK2M2dXZFK1l0U2xGbWp0QkVyRC9hWmk4K2pMdll3L3ZMWWs5ajFINmo2RWlEbzNLYmtpNi90RHc9PQo=",
+      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.23/Claude.Memory.Manager.app.tar.gz"
     }
   }
 }
