@@ -140,35 +140,30 @@ pub fn graph_edge_boosts_end(edge_type: &str, end_is_target: bool) -> bool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictVerdict {
-    /// Different projects, or a project's exception to a global memory: both stay.
+    /// Different scopes (two projects, or a project and global): both stay.
     Unrelated,
     /// Index (0 or 1) of the memory to keep.
     Keep(usize),
-    /// A newer project note disputes an older standing rule.
+    /// A newer non-rule memory disputes an older standing rule in the same scope.
     Ask,
 }
 
-/// The newer memory wins, except that a project note never overrides a
-/// standing rule (ask), and a project-scoped memory never archives a global one
-/// (a local exception, so both stay).
+/// Only memories in the same scope can contradict; a project-scoped memory is
+/// a local exception to a global one. Within a scope the newer memory wins,
+/// except that a non-rule never overrides a standing rule (ask).
 pub fn conflict_verdict(
     a: (Option<&str>, Option<&str>, i64),
     b: (Option<&str>, Option<&str>, i64),
 ) -> ConflictVerdict {
     let (a_type, a_project, a_created) = a;
     let (b_type, b_project, b_created) = b;
-    if matches!((a_project, b_project), (Some(x), Some(y)) if x != y) {
+    if a_project != b_project {
         return ConflictVerdict::Unrelated;
     }
-    let (newer, newer_type, older_type, local_beats_global) = if a_created >= b_created {
-        (0, a_type, b_type, a_project.is_some() && b_project.is_none())
-    } else {
-        (1, b_type, a_type, b_project.is_some() && a_project.is_none())
-    };
+    let (newer, newer_type, older_type) =
+        if a_created >= b_created { (0, a_type, b_type) } else { (1, b_type, a_type) };
     if is_standing_rule(older_type) && !is_standing_rule(newer_type) {
         ConflictVerdict::Ask
-    } else if local_beats_global {
-        ConflictVerdict::Unrelated
     } else {
         ConflictVerdict::Keep(newer)
     }
@@ -449,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn newer_memory_wins_unless_a_project_note_disputes_a_rule() {
+    fn only_same_scope_memories_conflict_and_newer_wins_unless_it_disputes_a_rule() {
         let side = |t: &'static str, p: Option<&'static str>, at: i64| (Some(t), p, at);
         assert_eq!(
             conflict_verdict(side("project", Some("/a"), 1), side("project", Some("/b"), 2)),
@@ -457,7 +452,7 @@ mod tests {
         );
         assert_eq!(
             conflict_verdict(side("project", Some("/a"), 1), side("feedback", None, 2)),
-            ConflictVerdict::Keep(1)
+            ConflictVerdict::Unrelated
         );
         assert_eq!(
             conflict_verdict(side("project", Some("/a"), 2), side("project", Some("/a"), 1)),
@@ -465,7 +460,7 @@ mod tests {
         );
         assert_eq!(
             conflict_verdict(side("feedback", None, 1), side("project", Some("/a"), 2)),
-            ConflictVerdict::Ask
+            ConflictVerdict::Unrelated
         );
         assert_eq!(
             conflict_verdict(side("feedback", None, 1), side("feedback", Some("/a"), 2)),
@@ -477,7 +472,15 @@ mod tests {
         );
         assert_eq!(
             conflict_verdict(side("feedback", Some("/a"), 1), side("feedback", None, 2)),
-            ConflictVerdict::Keep(1)
+            ConflictVerdict::Unrelated
+        );
+        assert_eq!(
+            conflict_verdict(side("feedback", None, 1), side("project", None, 2)),
+            ConflictVerdict::Ask
+        );
+        assert_eq!(
+            conflict_verdict(side("feedback", Some("/a"), 1), side("project", Some("/a"), 2)),
+            ConflictVerdict::Ask
         );
     }
 }
