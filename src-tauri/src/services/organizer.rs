@@ -2108,6 +2108,19 @@ mod tests {
         assert_eq!(edge_types(&new_note), vec!["supersedes"]);
         assert!(resolve_conflict(&disputed.id, &old_rule.id).is_err());
 
+        let gone_a = new("Use yarn", "project", Some("/p/a"), 100);
+        let gone_b = new("Use bun", "project", Some("/p/a"), 200);
+        contradict(&gone_a, &gone_b);
+        save_conflict_proposal(&gone_a, &gone_b, "one side archived elsewhere").unwrap();
+        let before = dreams::pending_count().unwrap();
+        memories::archive(&gone_b.id).unwrap();
+        assert_eq!(dreams::pending_count().unwrap(), before - 1);
+        assert!(dreams::list_pending().unwrap().iter().all(|p| p.target_memory_id.as_deref() != Some(gone_a.id.as_str())
+            && p.related_memory_id.as_deref() != Some(gone_a.id.as_str())));
+        memories::unarchive(&gone_b.id).unwrap();
+        assert_eq!(dreams::pending_count().unwrap(), before);
+        memories::archive(&gone_b.id).unwrap();
+
         crate::store::with_conn(|c| c.execute("UPDATE history SET timestamp = 0", []).map_err(|e| e.to_string()))
             .unwrap();
         undo_last().unwrap();

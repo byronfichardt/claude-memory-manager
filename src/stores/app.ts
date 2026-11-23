@@ -356,19 +356,28 @@ export const useAppStore = defineStore("app", () => {
     }
   }
 
+  async function settleDreamProposal(id: string, action: () => Promise<void>) {
+    dreamError.value = null;
+    try {
+      await action();
+      dreamProposals.value = dreamProposals.value.filter((p) => p.id !== id);
+    } catch (e) {
+      dreamError.value = String(e);
+      await loadDreamProposals();
+      throw e;
+    }
+  }
+
   async function applyDreamProposal(id: string) {
-    await tauri.applyDreamProposal(id);
-    dreamProposals.value = dreamProposals.value.filter((p) => p.id !== id);
+    await settleDreamProposal(id, () => tauri.applyDreamProposal(id));
   }
 
   async function dismissDreamProposal(id: string) {
-    await tauri.dismissDreamProposal(id);
-    dreamProposals.value = dreamProposals.value.filter((p) => p.id !== id);
+    await settleDreamProposal(id, () => tauri.dismissDreamProposal(id));
   }
 
   async function resolveConflictProposal(id: string, keepId: string) {
-    await tauri.resolveConflictProposal(id, keepId);
-    dreamProposals.value = dreamProposals.value.filter((p) => p.id !== id);
+    await settleDreamProposal(id, () => tauri.resolveConflictProposal(id, keepId));
   }
 
   async function initialize() {

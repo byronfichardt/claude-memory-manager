@@ -74,10 +74,17 @@ pub fn save_proposals(proposals: &[DreamProposal]) -> Result<(), String> {
     Ok(())
 }
 
+/// A conflict stays open only while both of its memories are still active.
+const LIVE: &str = "(proposal_type != 'conflict' OR (SELECT COUNT(*) FROM memories m \
+    WHERE m.id IN (dream_proposals.target_memory_id, dream_proposals.related_memory_id) \
+    AND m.archived_at IS NULL) = 2)";
+
 pub fn list_pending() -> Result<Vec<DreamProposal>, String> {
     with_conn(|conn| {
         let mut stmt = conn
-            .prepare("SELECT * FROM dream_proposals WHERE status = 'pending' ORDER BY proposal_type DESC, created_at ASC")
+            .prepare(&format!(
+                "SELECT * FROM dream_proposals WHERE status = 'pending' AND {LIVE} ORDER BY proposal_type DESC, created_at ASC"
+            ))
             .map_err(|e| format!("prepare list_pending: {}", e))?;
         let rows = stmt
             .query_map([], row_to_proposal)
@@ -119,7 +126,7 @@ pub fn get(id: &str) -> Result<Option<DreamProposal>, String> {
 pub fn pending_count() -> Result<i64, String> {
     with_conn(|conn| {
         conn.query_row(
-            "SELECT COUNT(*) FROM dream_proposals WHERE status = 'pending'",
+            &format!("SELECT COUNT(*) FROM dream_proposals WHERE status = 'pending' AND {LIVE}"),
             [],
             |r| r.get(0),
         )
@@ -164,7 +171,7 @@ pub fn find_conflict(a: &str, b: &str) -> Result<Option<DreamProposal>, String> 
 pub fn pending_conflict_count() -> Result<i64, String> {
     with_conn(|conn| {
         conn.query_row(
-            "SELECT COUNT(*) FROM dream_proposals WHERE status = 'pending' AND proposal_type = 'conflict'",
+            &format!("SELECT COUNT(*) FROM dream_proposals WHERE status = 'pending' AND proposal_type = 'conflict' AND {LIVE}"),
             [],
             |r| r.get(0),
         )
@@ -176,9 +183,9 @@ pub fn pending_conflict_count() -> Result<i64, String> {
 pub fn unexplained_conflicts() -> Result<Vec<DreamProposal>, String> {
     with_conn(|conn| {
         let mut stmt = conn
-            .prepare(
-                "SELECT * FROM dream_proposals WHERE status = 'pending' AND proposal_type = 'conflict' AND content = '' ORDER BY created_at",
-            )
+            .prepare(&format!(
+                "SELECT * FROM dream_proposals WHERE status = 'pending' AND proposal_type = 'conflict' AND content = '' AND {LIVE} ORDER BY created_at"
+            ))
             .map_err(|e| format!("prepare unexplained_conflicts: {}", e))?;
         let rows = stmt
             .query_map([], row_to_proposal)
