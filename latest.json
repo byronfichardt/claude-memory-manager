@@ -1,11 +1,11 @@
 {
-  "version": "0.4.21",
-  "notes": "Contradicting memories now explain what they disagree on, show when each was saved, and flag pairs that are not a real conflict.",
-  "pub_date": "2026-11-17T09:44:25Z",
+  "version": "0.4.22",
+  "notes": "Conflict cards whose memories were already archived no longer show, and failed actions in the Dream view now show an error instead of doing nothing.",
+  "pub_date": "2026-11-23T08:22:55Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRHJCUGdkVWZWT2VWRXUxZ2k1djEyUUcrS3RHYmgzbmRQbjMxWHNkNGpHYkQyVlJEK0VsKzN1Q3ZjOUhpNGM5UGRzdjY1aURKc3RoUHhJTDBMUXVaeVFzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0OTA4NjU0CWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKYUpTeTBYWmpzeVNIYXgvMW9zNWNXZ3oyeXlqYWFyK3J5WWozMjI1NnpFM2V2UTlsaWJ1U1p5bjhtZ1BuYm1mR1ZnOGJhUm1kNDYrbERlVVVLR01GQ1E9PQo=",
-      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.21/Claude.Memory.Manager.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc3puS0RNNEhFRGlNNStLWXkxWldHRVBCaTF6OXBhT25tTnMzcUQwNklSdzg5Y090em9OU1AzamtCQTFaZ25WZlR5QVRWL3JJVHhXSDZvcTF0MG9TamxuTlVRbFZVQUFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NDIyMTUxCWZpbGU6Q2xhdWRlIE1lbW9yeSBNYW5hZ2VyLmFwcC50YXIuZ3oKQlJka3RmbytNTkJOWXJVMUtPNjNQaG4yZklxSHUrNXgyaUkwMzAwZno1ZWFabUlZSmdLeElULys3UmVVbHdNOEJGT0huSlMwTUh4VVdlWWMzUmgxQWc9PQo=",
+      "url": "https://github.com/byronfichardt/claude-memory-manager/releases/download/v0.4.22/Claude.Memory.Manager.app.tar.gz"
     }
   }
 }
